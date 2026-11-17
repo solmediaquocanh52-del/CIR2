@@ -1,0 +1,52 @@
+name: Build CircleSwitcher 2.0.0 (.deb)
+
+on:
+  push:
+    branches: [ main, master ]
+  pull_request:
+    branches: [ main, master ]
+  workflow_dispatch:
+
+jobs:
+  build:
+    name: Build Rootless & Rootful .deb
+    runs-on: macos-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install Theos & Patched iOS SDKs
+        run: |
+          export THEOS="$HOME/theos"
+          git clone --recursive --depth=1 https://github.com/theos/theos.git "$THEOS"
+          mkdir -p "$THEOS/sdks"
+          curl -sL https://github.com/theos/sdks/archive/master.tar.gz | tar -xz -C "$THEOS/sdks" --strip-components=1
+
+      - name: Build Rootless Package (iOS 15 - 16.3.1+)
+        run: |
+          export THEOS="$HOME/theos"
+          make clean package FINALPACKAGE=1 THEOS_PACKAGE_SCHEME=rootless
+          mkdir -p dist/rootless
+          cp packages/*.deb dist/rootless/
+
+      - name: Build Rootful Package (iOS 14)
+        run: |
+          export THEOS="$HOME/theos"
+          make clean package FINALPACKAGE=1
+          mkdir -p dist/rootful
+          cp packages/*.deb dist/rootful/
+
+      - name: Upload Rootless .deb Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: CircleSwitcher-2.0.0-Rootless-deb
+          path: dist/rootless/*.deb
+          if-no-files-found: error
+
+      - name: Upload Rootful .deb Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: CircleSwitcher-2.0.0-Rootful-deb
+          path: dist/rootful/*.deb
+          if-no-files-found: error
