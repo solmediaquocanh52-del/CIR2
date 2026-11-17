@@ -1,0 +1,9 @@
+Package: com.vn.circleswitcher
+Name: CircleSwitcher
+Version: 2.0.0
+Architecture: iphoneos-arm
+Description: 3D Hologram Cylinder, Orbital Orbs & Liquid Glass App Switcher (VI/EN) for iOS 14 - 16+.
+Maintainer: VN Developer
+Author: VN Developer
+Section: Tweaks
+Depends: mobilesubstrate (>= 0.9.5000), preferenceloader, firmware (>= 14.0)
