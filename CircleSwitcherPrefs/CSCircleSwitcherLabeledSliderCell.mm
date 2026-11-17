@@ -36,7 +36,7 @@
         self.sliderControl.translatesAutoresizingMaskIntoConstraints = NO;
         self.sliderControl.continuous = YES;
         [self.sliderControl addTarget:self action:@selector(sliderChanged:) forControlEvents:UIControlEventValueChanged];
-        [self.sliderControl addTarget:self action:@selector(sliderFinished:) forControlEvents:UIControlEventTouchUpInside | UIControlEventTouchUpOutside | UIControlEventTouchCancel];
+        [self.sliderControl addTarget:self action:@selector(sliderFinished:) forControlEvents:(UIControlEvents)(UIControlEventTouchUpInside | UIControlEventTouchUpOutside | UIControlEventTouchCancel)];
 
         [self.contentView addSubview:self.titleField];
         [self.contentView addSubview:self.valueField];

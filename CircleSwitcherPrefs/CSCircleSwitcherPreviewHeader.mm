@@ -272,7 +272,7 @@ static UIColor *CSPreviewColorFromHex(NSString *hexStr, CGFloat alpha) {
         CGFloat targetSpin = self.spinAngle + (velocityX / 1200.0f);
         // Snap gently to nearest card index (step = 2*PI / 6)
         CGFloat step = (2.0f * M_PI) / 6.0f;
-        CGFloat snapped = roundf(targetSpin / step) * step;
+        CGFloat snapped = round(targetSpin / step) * step;
         [UIView animateWithDuration:0.38 delay:0 usingSpringWithDamping:0.76 initialSpringVelocity:0.4 options:UIViewAnimationOptionAllowUserInteraction animations:^{
             self.spinAngle = snapped;
             [self reloadPreviewFromPreferences];
@@ -383,14 +383,14 @@ static UIColor *CSPreviewColorFromHex(NSString *hexStr, CGFloat alpha) {
         // Angular position around full 360 cylinder (index 2 starts at front theta=0)
         CGFloat rawTheta = ((i - 2) * (2.0f * M_PI / (CGFloat)count)) + self.spinAngle;
         // Wrap to [-PI, +PI]
-        CGFloat theta = fmodf(rawTheta + M_PI, 2.0f * M_PI);
+        CGFloat theta = fmod(rawTheta + M_PI, 2.0f * M_PI);
         if (theta < 0) theta += 2.0f * M_PI;
         theta -= M_PI;
 
-        CGFloat cosT = cosf(theta);
-        CGFloat sinT = sinf(theta);
+        CGFloat cosT = cos(theta);
+        CGFloat sinT = sin(theta);
         CGFloat normT = theta / (M_PI * 0.55f);
-        CGFloat absNormT = fabsf(normT);
+        CGFloat absNormT = fabs(normT);
 
         if (cosT > bestFrontScore) {
             bestFrontScore = cosT;
@@ -451,8 +451,8 @@ static UIColor *CSPreviewColorFromHex(NSString *hexStr, CGFloat alpha) {
             // CoverFlow / Inverse CoverFlow
             CGFloat sign = (sinT >= 0) ? 1.0f : -1.0f;
             posX = (w * 0.5f) + sinT * (w * 0.38f) * spacing;
-            transZ = -fabsf(sinT) * 75.0f;
-            angleY = (mode == 7 ? -sign : sign) * MIN(1.0f, fabsf(sinT) * 1.4f) * (M_PI / 3.5f) * curvature;
+            transZ = -fabs(sinT) * 75.0f;
+            angleY = (mode == 7 ? -sign : sign) * MIN(1.0f, fabs(sinT) * 1.4f) * (M_PI / 3.5f) * curvature;
             depthScale = 0.74f + 0.26f * MAX(0.0f, cosT);
         } else {
             // Circle Wheel / 3D Cards / Deck / 2D Flat
@@ -536,7 +536,7 @@ static UIColor *CSPreviewColorFromHex(NSString *hexStr, CGFloat alpha) {
         CATransform3D tx = CATransform3DIdentity;
         tx.m34 = -1.0f / 500.0f;
         tx = CATransform3DTranslate(tx, 0, 0, transZ);
-        if (fabsf(angleY) > 0.0001f) {
+        if (fabs(angleY) > 0.0001f) {
             tx = CATransform3DRotate(tx, angleY, 0.0f, 1.0f, 0.0f);
         }
         tx = CATransform3DScale(tx, depthScale, depthScale, 1.0f);

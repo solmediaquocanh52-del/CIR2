@@ -669,7 +669,7 @@ static void CSExtractAppHeaderInfo(SBFluidSwitcherItemContainer *container, UIIm
     // Infinite 360 Circular Wrap-around on normalized angle t
     if (kInfiniteScroll && (kLayoutMode == 0 || kLayoutMode == 1 || kLayoutMode == 2 || kLayoutMode == 3 || kLayoutMode == 4)) {
         CGFloat period = 3.6f; // Full 360 cylinder span in normalized units
-        t = fmodf(t + period * 0.5f, period);
+        t = fmod(t + period * 0.5f, period);
         if (t < 0) t += period;
         t -= period * 0.5f;
     }
@@ -709,11 +709,11 @@ static void CSExtractAppHeaderInfo(SBFluidSwitcherItemContainer *container, UIIm
             // Mode 0: Vòng Trụ Thẻ 3D (3D Hologram Cylinder — Carousel Cards)
             CGFloat theta = clampedT * (M_PI / 2.25f) * kWheelCurvature;
             CGFloat cylRadius = screenW * 0.58f * kCardSpacing;
-            transX = (cylRadius * sinf(theta)) - deltaX;
-            transZ = cylRadius * (cosf(theta) - 1.0f);
-            transY = -fabsf(sinf(theta * 0.5f)) * 18.0f;
+            transX = (cylRadius * sin(theta)) - deltaX;
+            transZ = cylRadius * (cos(theta) - 1.0f);
+            transY = -fabs(sin(theta * 0.5f)) * 18.0f;
             angleY = -theta * 0.82f;
-            CGFloat depthScale = kCardScale * (0.72f + 0.28f * (cosf(theta) * 0.5f + 0.5f));
+            CGFloat depthScale = kCardScale * (0.72f + 0.28f * (cos(theta) * 0.5f + 0.5f));
             scaleX = depthScale;
             scaleY = depthScale;
             break;
@@ -722,11 +722,11 @@ static void CSExtractAppHeaderInfo(SBFluidSwitcherItemContainer *container, UIIm
             // Mode 1: Icon Tròn Vòng Trụ 3D (3D Cylindrical Orbs — Standing Orbs)
             CGFloat theta = clampedT * (M_PI / 2.25f) * kWheelCurvature;
             CGFloat cylRadius = screenW * 0.56f * kCardSpacing;
-            transX = (cylRadius * sinf(theta)) - deltaX;
-            transZ = cylRadius * (cosf(theta) - 1.0f);
-            transY = -fabsf(sinf(theta * 0.5f)) * 22.0f;
+            transX = (cylRadius * sin(theta)) - deltaX;
+            transZ = cylRadius * (cos(theta) - 1.0f);
+            transY = -fabs(sin(theta * 0.5f)) * 22.0f;
             angleY = -theta * 0.85f;
-            CGFloat orbBase = kOrbSize * (0.70f + 0.30f * (cosf(theta) * 0.5f + 0.5f));
+            CGFloat orbBase = kOrbSize * (0.70f + 0.30f * (cos(theta) * 0.5f + 0.5f));
             scaleX = orbBase;
             scaleY = orbBase * aspectCorrection; // Perfect 1:1 standing circle orb
             break;
@@ -746,10 +746,10 @@ static void CSExtractAppHeaderInfo(SBFluidSwitcherItemContainer *container, UIIm
             // Mode 3: Bánh Xe Icon 360° (Radial Ring Wheel)
             CGFloat theta = clampedT * (M_PI / 1.9f);
             CGFloat ringR = screenW * 0.38f * kCardSpacing;
-            transX = (ringR * sinf(theta)) - deltaX;
-            transY = -ringR * cosf(theta) + ringR * 0.35f;
+            transX = (ringR * sin(theta)) - deltaX;
+            transY = -ringR * cos(theta) + ringR * 0.35f;
             transZ = -absT * 55.0f;
-            CGFloat orbBase = kOrbSize * (0.65f + 0.35f * MAX(0.0f, cosf(theta)));
+            CGFloat orbBase = kOrbSize * (0.65f + 0.35f * MAX(0.0f, cos(theta)));
             scaleX = orbBase;
             scaleY = orbBase * aspectCorrection;
             break;
@@ -809,10 +809,10 @@ static void CSExtractAppHeaderInfo(SBFluidSwitcherItemContainer *container, UIIm
     }
 
     transform = CATransform3DTranslate(transform, transX, transY, transZ);
-    if (fabsf(angleY) > 0.0001f) {
+    if (fabs(angleY) > 0.0001f) {
         transform = CATransform3DRotate(transform, angleY, 0.0f, 1.0f, 0.0f);
     }
-    if (fabsf(angleZ) > 0.0001f) {
+    if (fabs(angleZ) > 0.0001f) {
         transform = CATransform3DRotate(transform, angleZ, 0.0f, 0.0f, 1.0f);
     }
     transform = CATransform3DScale(transform, scaleX, scaleY, 1.0f);

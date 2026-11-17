@@ -5,7 +5,7 @@ include $(THEOS)/makefiles/common.mk
 
 BUNDLE_NAME = CircleSwitcherPrefs
 CircleSwitcherPrefs_FILES = CSCircleSwitcherRootListController.mm CSCircleSwitcherLogoCell.mm CSCircleSwitcherPreviewHeader.mm CSCircleSwitcherEasterEgg.mm CSCircleSwitcherColorCell.mm CSCircleSwitcherLabeledSliderCell.mm
-CircleSwitcherPrefs_CFLAGS = -fobjc-arc -Wno-deprecated-declarations -Wno-unused-variable -Wno-unused-function
+CircleSwitcherPrefs_CFLAGS = -fobjc-arc -Wno-deprecated-declarations -Wno-unused-variable -Wno-unused-function -Wno-absolute-value
 CircleSwitcherPrefs_FRAMEWORKS = UIKit QuartzCore CoreGraphics Metal
 CircleSwitcherPrefs_PRIVATE_FRAMEWORKS = Preferences
 CircleSwitcherPrefs_INSTALL_PATH = /Library/PreferenceBundles

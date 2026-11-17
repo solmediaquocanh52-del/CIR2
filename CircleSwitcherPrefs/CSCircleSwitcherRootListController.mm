@@ -26,14 +26,14 @@ static NSString *CSUIColorToHex(UIColor *color) {
         [color getWhite:&w alpha:&a];
         r = g = b = w;
     }
-    int ri = (int)lroundf((float)(MAX(0.0, MIN(1.0, r)) * 255.0));
-    int gi = (int)lroundf((float)(MAX(0.0, MIN(1.0, g)) * 255.0));
-    int bi = (int)lroundf((float)(MAX(0.0, MIN(1.0, b)) * 255.0));
+    int ri = (int)lround(MAX(0.0, MIN(1.0, r)) * 255.0);
+    int gi = (int)lround(MAX(0.0, MIN(1.0, g)) * 255.0);
+    int bi = (int)lround(MAX(0.0, MIN(1.0, b)) * 255.0);
     return [NSString stringWithFormat:@"#%02X%02X%02X", ri, gi, bi];
 }
 
 static UIColor *CSColorFromHueDegrees(CGFloat hueDeg) {
-    CGFloat h = fmodf((float)hueDeg, 360.0f) / 360.0f;
+    CGFloat h = fmod(hueDeg, 360.0) / 360.0;
     if (h < 0) h += 1.0f;
     return [UIColor colorWithHue:h saturation:0.88 brightness:1.0 alpha:1.0];
 }
@@ -124,7 +124,7 @@ static UIColor *CSColorFromHueDegrees(CGFloat hueDeg) {
     };
 
     if (animated) {
-        [UIView animateWithDuration:0.28 delay:0 usingSpringWithDamping:0.84 initialSpringVelocity:0.4 options:0 animations:applyBlock completion:nil];
+        [UIView animateWithDuration:0.28 delay:0 usingSpringWithDamping:0.84 initialSpringVelocity:0.4 options:(UIViewAnimationOptions)0 animations:applyBlock completion:nil];
     } else {
         applyBlock();
     }
@@ -196,11 +196,11 @@ static UIColor *CSColorFromHueDegrees(CGFloat hueDeg) {
     }
 }
 
-- (void)colorPickerViewControllerDidSelectColor:(UIColorPickerViewController *)viewController API_AVAILABLE(ios(14.0)) {
+- (void)colorPickerViewControllerDidSelectColor:(UIColorPickerViewController *)viewController {
     [self saveSelectedColor:viewController.selectedColor];
 }
 
-- (void)colorPickerViewControllerDidFinish:(UIColorPickerViewController *)viewController API_AVAILABLE(ios(14.0)) {
+- (void)colorPickerViewControllerDidFinish:(UIColorPickerViewController *)viewController {
     [self saveSelectedColor:viewController.selectedColor];
     [self reloadSpecifiers];
 }
@@ -329,7 +329,7 @@ static UIColor *CSColorFromHueDegrees(CGFloat hueDeg) {
     NSBundle *bundle = [NSBundle bundleForClass:[self class]];
     NSString *jsonPath = [bundle pathForResource:@"Presets" ofType:@"json"];
     NSData *data = jsonPath ? [NSData dataWithContentsOfFile:jsonPath] : nil;
-    NSDictionary *parsed = data ? [NSJSONSerialization JSONObjectWithData:data options:0 error:nil] : nil;
+    NSDictionary *parsed = data ? [NSJSONSerialization JSONObjectWithData:data options:(NSJSONReadingOptions)0 error:nil] : nil;
     NSArray *presets = parsed[@"presets"];
 
     BOOL isEN = [self isEnglishLanguage];
