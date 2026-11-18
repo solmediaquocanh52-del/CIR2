@@ -21,16 +21,24 @@ jobs:
         uses: actions/cache@v4
         with:
           path: ~/theos
-          key: theos-sdks-v2-${{ runner.os }}
+          key: theos-sdks-v3-${{ runner.os }}
 
       - name: Install Theos, Linux Toolchain & iOS SDKs
         if: steps.cache-theos.outputs.cache-hit != 'true'
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          THEOS: /home/runner/theos
         run: |
           sudo apt-get update -y
           sudo apt-get install -y fakeroot dpkg perl git curl unzip xz-utils
+          rm -rf "$HOME/theos"
+          echo "header = \"Authorization: Bearer ${GITHUB_TOKEN}\"" > ~/.curlrc
           bash -c "$(curl -fsSL https://raw.githubusercontent.com/theos/theos/master/bin/install-theos)" || true
+          rm -f ~/.curlrc
+          if [ ! -f "$HOME/theos/makefiles/common.mk" ]; then
+            rm -rf "$HOME/theos"
+            git clone --recursive --depth=1 https://github.com/theos/theos.git "$HOME/theos"
+          fi
           if [ ! -d "$HOME/theos/sdks" ] || [ -z "$(ls -A $HOME/theos/sdks 2>/dev/null)" ]; then
             mkdir -p "$HOME/theos/sdks"
             curl -fsSL https://github.com/theos/sdks/archive/refs/heads/master.tar.gz -o /tmp/sdks.tar.gz
@@ -38,6 +46,7 @@ jobs:
             cp -r /tmp/sdks-master/*.sdk "$HOME/theos/sdks/"
             rm -rf /tmp/sdks.tar.gz /tmp/sdks-master
           fi
+          test -f "$HOME/theos/makefiles/common.mk"
 
       - name: Build Rootless Package (iOS 15 - 16.3.1+)
         run: |
