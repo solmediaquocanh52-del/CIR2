@@ -21,36 +21,50 @@ jobs:
         uses: actions/cache@v4
         with:
           path: ~/theos
-          key: theos-sdks-v3-${{ runner.os }}
+          key: theos-sdks-v4-${{ runner.os }}
 
       - name: Install Theos, Linux Toolchain & iOS SDKs
         if: steps.cache-theos.outputs.cache-hit != 'true'
         env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          THEOS: /home/runner/theos
         run: |
+          set -e
           sudo apt-get update -y
-          sudo apt-get install -y fakeroot dpkg perl git curl unzip xz-utils
-          rm -rf "$HOME/theos"
-          echo "header = \"Authorization: Bearer ${GITHUB_TOKEN}\"" > ~/.curlrc
-          bash -c "$(curl -fsSL https://raw.githubusercontent.com/theos/theos/master/bin/install-theos)" || true
-          rm -f ~/.curlrc
-          if [ ! -f "$HOME/theos/makefiles/common.mk" ]; then
-            rm -rf "$HOME/theos"
-            git clone --recursive --depth=1 https://github.com/theos/theos.git "$HOME/theos"
+          sudo apt-get install -y fakeroot dpkg perl git curl unzip xz-utils libtinfo5 || sudo apt-get install -y fakeroot dpkg perl git curl unzip xz-utils
+          rm -rf "$HOME/theos" /tmp/tc /tmp/sdks
+
+          echo "==> Cloning Theos..."
+          git clone --recursive --depth=1 https://github.com/theos/theos.git "$HOME/theos"
+
+          echo "==> Downloading Linux iOS Toolchain via GitHub CLI..."
+          mkdir -p "$HOME/theos/toolchain" /tmp/tc
+          gh release download --repo theos/toolchain-linux-iphone --pattern "*.tar.*" -D /tmp/tc
+          for f in /tmp/tc/*.tar.*; do
+            tar -xf "$f" -C "$HOME/theos/toolchain/"
+          done
+          if [ ! -d "$HOME/theos/toolchain/linux/iphone" ] && [ -d "$HOME/theos/toolchain/bin" ]; then
+            mkdir -p "$HOME/theos/toolchain/linux/iphone"
+            mv "$HOME/theos/toolchain/bin" "$HOME/theos/toolchain/lib" "$HOME/theos/toolchain/include" "$HOME/theos/toolchain/share" "$HOME/theos/toolchain/linux/iphone/" 2>/dev/null || true
           fi
-          if [ ! -d "$HOME/theos/sdks" ] || [ -z "$(ls -A $HOME/theos/sdks 2>/dev/null)" ]; then
-            mkdir -p "$HOME/theos/sdks"
-            curl -fsSL https://github.com/theos/sdks/archive/refs/heads/master.tar.gz -o /tmp/sdks.tar.gz
-            tar -xzf /tmp/sdks.tar.gz -C /tmp
-            cp -r /tmp/sdks-master/*.sdk "$HOME/theos/sdks/"
-            rm -rf /tmp/sdks.tar.gz /tmp/sdks-master
-          fi
+
+          echo "==> Downloading Patched iOS SDKs via GitHub CLI..."
+          mkdir -p "$HOME/theos/sdks" /tmp/sdks
+          gh release download --repo theos/sdks --pattern "iPhoneOS*.tar.*" -D /tmp/sdks
+          for f in /tmp/sdks/*.tar.*; do
+            tar -xf "$f" -C "$HOME/theos/sdks/"
+          done
+          rm -rf /tmp/tc /tmp/sdks
+
+          echo "==> Verifying Theos installation..."
           test -f "$HOME/theos/makefiles/common.mk"
+          ls -la "$HOME/theos/toolchain/linux/iphone/bin"
+          ls -d "$HOME/theos/sdks/"*.sdk
 
       - name: Build Rootless Package (iOS 15 - 16.3.1+)
         run: |
           export THEOS=$HOME/theos
+          rm -rf packages artifacts/rootless
           mkdir -p artifacts/rootless
           make clean
           make package FINALPACKAGE=1 THEOS_PACKAGE_SCHEME=rootless
@@ -59,6 +73,7 @@ jobs:
       - name: Build Rootful Package (iOS 14)
         run: |
           export THEOS=$HOME/theos
+          rm -rf packages artifacts/rootful
           mkdir -p artifacts/rootful
           make clean
           make package FINALPACKAGE=1
