@@ -71,10 +71,7 @@ static UIColor *CSColorFromHueDegrees(CGFloat hueDeg) {
                                                                 action:@selector(shareTweak)];
     self.navigationItem.rightBarButtonItem = shareBtn;
 
-    // ========================================================================
     // Sticky Floating 3D Live Preview pinned at top of Safe Area
-    // Stays visible no matter how deep the user scrolls down!
-    // ========================================================================
     self.stickyPreviewHeader = [[CSCircleSwitcherPreviewHeader alloc] initWithFrame:CGRectMake(12, 0, self.view.bounds.size.width - 24, 212)];
     self.stickyPreviewHeader.translatesAutoresizingMaskIntoConstraints = NO;
     self.stickyPreviewHeader.delegate = self;
@@ -90,7 +87,6 @@ static UIColor *CSColorFromHueDegrees(CGFloat hueDeg) {
 
     [self updateTableInsetForStickyPreview:NO];
 
-    // Hidden Pull-Down Easter Egg Header inside TableView
     UIButton *secretBtn = [UIButton buttonWithType:UIButtonTypeSystem];
     secretBtn.frame = CGRectMake(0, 0, self.view.bounds.size.width, 32);
     [secretBtn setTitle:@"CircleSwitcher 2.0.0" forState:UIControlStateNormal];
@@ -99,7 +95,6 @@ static UIColor *CSColorFromHueDegrees(CGFloat hueDeg) {
     [secretBtn addTarget:self action:@selector(openEasterEgg) forControlEvents:UIControlEventTouchUpInside];
     self.table.tableHeaderView = secretBtn;
 
-    // Listen to real-time 60fps slider drags
     [[NSNotificationCenter defaultCenter] addObserver:self
                                              selector:@selector(handleLiveSliderUpdate:)
                                                  name:@"CSPrefsSliderLiveChanged"
@@ -148,7 +143,6 @@ static UIColor *CSColorFromHueDegrees(CGFloat hueDeg) {
         [defaults synchronize];
 
         if ([key isEqualToString:@"language"]) {
-            // Instantly switch between Vietnamese (Root.plist) and English (Root_EN.plist)
             _specifiers = nil;
             [self reloadSpecifiers];
         } else if ([key isEqualToString:@"motionBlurOn"] && [value boolValue]) {
@@ -212,9 +206,9 @@ static UIColor *CSColorFromHueDegrees(CGFloat hueDeg) {
     NSUserDefaults *defaults = [[NSUserDefaults alloc] initWithSuiteName:@"com.vn.circleswitcher"];
     [defaults setObject:hex forKey:self.activeColorPickerKey];
     if ([self.activeColorPickerKey isEqualToString:@"glowColorHex"]) {
-        [defaults setObject:@5 forKey:@"glowColorIndex"]; // Custom Full RGB mode
+        [defaults setObject:@5 forKey:@"glowColorIndex"];
     } else if ([self.activeColorPickerKey isEqualToString:@"baseColorHex"]) {
-        [defaults setObject:@NO forKey:@"baseSyncColor"]; // Auto-disable sync when picking custom base color
+        [defaults setObject:@NO forKey:@"baseSyncColor"];
     }
     [defaults synchronize];
 
@@ -338,6 +332,10 @@ static UIColor *CSColorFromHueDegrees(CGFloat hueDeg) {
                                                             preferredStyle:UIAlertControllerStyleActionSheet];
 
     if (presets && presets.count > 0) {
+        NSUserDefaults *defaults = [[NSUserDefaults alloc] initWithSuiteName:@"com.vn.circleswitcher"];
+        [defaults synchronize];
+        NSInteger currentMode = [defaults integerForKey:@"layoutMode"];
+
         for (NSDictionary *item in presets) {
             NSString *name = item[@"name"] ?: @"Preset";
             NSDictionary *vals = item[@"values"] ?: @{};
@@ -350,7 +348,7 @@ static UIColor *CSColorFromHueDegrees(CGFloat hueDeg) {
                 CGFloat disp    = vals[@"glassDispersion"] ? ([vals[@"glassDispersion"] floatValue] / 100.0f) : 0.40f;
                 BOOL ringGlow   = vals[@"ringGlow"] ? [vals[@"ringGlow"] boolValue] : YES;
 
-                [self applyBatchPreferences:@{
+                NSMutableDictionary *batch = [@{
                     @"enabled": @YES,
                     @"liquidGlass": @YES,
                     @"glowColorIndex": @5,
@@ -359,9 +357,15 @@ static UIColor *CSColorFromHueDegrees(CGFloat hueDeg) {
                     @"glassRefract": @(refract),
                     @"glassSpecular": @(spec),
                     @"glassDispersion": @(disp),
-                    @"hologramBaseEnabled": @(ringGlow),
                     @"baseSyncColor": @YES
-                }];
+                } mutableCopy];
+
+                // Preserve hidden base ring in Orbital Preview (mode 2)
+                if (currentMode != 2) {
+                    batch[@"hologramBaseEnabled"] = @(ringGlow);
+                }
+
+                [self applyBatchPreferences:batch];
             }]];
         }
     }
