@@ -15,7 +15,7 @@ CircleSwitcherPrefs_FILES = \
 
 CircleSwitcherPrefs_FRAMEWORKS = UIKit Foundation CoreGraphics QuartzCore
 CircleSwitcherPrefs_PRIVATE_FRAMEWORKS = Preferences
-CircleSwitcherPrefs_CFLAGS = -fobjc-arc
+CircleSwitcherPrefs_CFLAGS = -fobjc-arc -Wno-error
 CircleSwitcherPrefs_INSTALL_PATH = /Library/PreferenceBundles
 CircleSwitcherPrefs_RESOURCE_DIRS = Resources
 
