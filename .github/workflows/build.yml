@@ -21,7 +21,7 @@ jobs:
         uses: actions/cache@v4
         with:
           path: ~/theos
-          key: theos-sdks-v5-${{ runner.os }}
+          key: theos-sdks-v6-${{ runner.os }}
 
       - name: Install Theos, Linux Toolchain & iOS SDKs
         if: steps.cache-theos.outputs.cache-hit != 'true'
@@ -32,29 +32,38 @@ jobs:
           set -e
           sudo apt-get update -y
           sudo apt-get install -y fakeroot dpkg perl git curl unzip xz-utils
-          rm -rf "$HOME/theos" /tmp/tc /tmp/sdks
+          rm -rf "$HOME/theos" /tmp/toolchain.tar.xz /tmp/sdk.tar.xz
 
           echo "==> Cloning Theos..."
           git clone --recursive --depth=1 https://github.com/theos/theos.git "$HOME/theos"
 
           echo "==> Downloading Linux iOS Toolchain..."
-          mkdir -p "$HOME/theos/toolchain" /tmp/tc
-          TC_TAG=$(gh api repos/theos/toolchain-linux-x86_64/releases --jq '.[0].tag_name')
-          gh release download "$TC_TAG" --repo theos/toolchain-linux-x86_64 --pattern "*.tar.xz" -D /tmp/tc || \
-          gh release download "$TC_TAG" --repo theos/toolchain-linux-x86_64 --pattern "*.tar.*" -D /tmp/tc
-          for f in /tmp/tc/*.tar.*; do
-            tar -xf "$f" -C "$HOME/theos/toolchain/"
-          done
+          mkdir -p "$HOME/theos/toolchain"
+          TC_URL=$(gh api repos/theos/toolchain/releases --jq '[.[] | select(.assets | length > 0)][0].assets[] | select(.name | test("linux.*(x86_64|amd64)|(x86_64|amd64).*linux"; "i")) | .browser_download_url' | head -n 1)
+          echo "Toolchain URL: $TC_URL"
+          test -n "$TC_URL"
+          curl -fL "$TC_URL" -o /tmp/toolchain.tar.xz
+          tar -xf /tmp/toolchain.tar.xz -C "$HOME/theos/toolchain/"
+          rm -f /tmp/toolchain.tar.xz
+
+          if [ ! -x "$HOME/theos/toolchain/linux/iphone/bin/ldid" ] && ! command -v ldid >/dev/null 2>&1; then
+            LDID_URL=$(gh api repos/ProcursusTeam/ldid/releases --jq '[.[] | select(.assets | length > 0)][0].assets[] | select(.name | test("linux.*x86_64"; "i")) | .browser_download_url' | head -n 1)
+            if [ -n "$LDID_URL" ]; then
+              curl -fL "$LDID_URL" -o "$HOME/theos/toolchain/linux/iphone/bin/ldid"
+              chmod +x "$HOME/theos/toolchain/linux/iphone/bin/ldid"
+            fi
+          fi
 
           echo "==> Downloading Patched iOS SDKs..."
-          mkdir -p "$HOME/theos/sdks" /tmp/sdks
-          SDK_TAG=$(gh api repos/theos/sdks/releases --jq '.[0].tag_name')
-          gh release download "$SDK_TAG" --repo theos/sdks --pattern "iPhoneOS*.sdk.tar.xz" -D /tmp/sdks || \
-          gh release download "$SDK_TAG" --repo theos/sdks --pattern "iPhoneOS*.tar.*" -D /tmp/sdks
-          for f in /tmp/sdks/*.tar.*; do
-            tar -xf "$f" -C "$HOME/theos/sdks/"
+          mkdir -p "$HOME/theos/sdks"
+          SDK_URLS=$(gh api repos/theos/sdks/releases --jq '[.[] | select(.assets | length > 0)][0].assets[] | select(.name | test("^iPhoneOS.*\\.sdk\\.tar\\."; "i")) | .browser_download_url')
+          test -n "$SDK_URLS"
+          for url in $SDK_URLS; do
+            echo "Downloading SDK: $url"
+            curl -fL "$url" -o /tmp/sdk.tar.xz
+            tar -xf /tmp/sdk.tar.xz -C "$HOME/theos/sdks/"
+            rm -f /tmp/sdk.tar.xz
           done
-          rm -rf /tmp/tc /tmp/sdks
 
           echo "==> Verifying Theos installation..."
           test -f "$HOME/theos/makefiles/common.mk"
