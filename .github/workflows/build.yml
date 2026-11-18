@@ -10,64 +10,49 @@ on:
 jobs:
   build:
     name: Build CircleSwitcher .deb
-    runs-on: ubuntu-latest
+    runs-on: macos-latest
 
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
+
+      - name: Install ldid & dpkg
+        run: |
+          HOMEBREW_NO_AUTO_UPDATE=1 HOMEBREW_NO_INSTALL_CLEANUP=1 brew install ldid dpkg
 
       - name: Cache Theos & iOS SDKs
         id: cache-theos
         uses: actions/cache@v4
         with:
           path: ~/theos
-          key: theos-sdks-v6-${{ runner.os }}
+          key: theos-macos-sdks-v1-${{ runner.os }}
 
-      - name: Install Theos, Linux Toolchain & iOS SDKs
+      - name: Install Theos & Patched iOS SDKs
         if: steps.cache-theos.outputs.cache-hit != 'true'
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           set -e
-          sudo apt-get update -y
-          sudo apt-get install -y fakeroot dpkg perl git curl unzip xz-utils
-          rm -rf "$HOME/theos" /tmp/toolchain.tar.xz /tmp/sdk.tar.xz
+          rm -rf "$HOME/theos"
 
           echo "==> Cloning Theos..."
           git clone --recursive --depth=1 https://github.com/theos/theos.git "$HOME/theos"
 
-          echo "==> Downloading Linux iOS Toolchain..."
-          mkdir -p "$HOME/theos/toolchain"
-          TC_URL=$(gh api repos/theos/toolchain/releases --jq '[.[] | select(.assets | length > 0)][0].assets[] | select(.name | test("linux.*(x86_64|amd64)|(x86_64|amd64).*linux"; "i")) | .browser_download_url' | head -n 1)
-          echo "Toolchain URL: $TC_URL"
-          test -n "$TC_URL"
-          curl -fL "$TC_URL" -o /tmp/toolchain.tar.xz
-          tar -xf /tmp/toolchain.tar.xz -C "$HOME/theos/toolchain/"
-          rm -f /tmp/toolchain.tar.xz
-
-          if [ ! -x "$HOME/theos/toolchain/linux/iphone/bin/ldid" ] && ! command -v ldid >/dev/null 2>&1; then
-            LDID_URL=$(gh api repos/ProcursusTeam/ldid/releases --jq '[.[] | select(.assets | length > 0)][0].assets[] | select(.name | test("linux.*x86_64"; "i")) | .browser_download_url' | head -n 1)
-            if [ -n "$LDID_URL" ]; then
-              curl -fL "$LDID_URL" -o "$HOME/theos/toolchain/linux/iphone/bin/ldid"
-              chmod +x "$HOME/theos/toolchain/linux/iphone/bin/ldid"
-            fi
-          fi
-
           echo "==> Downloading Patched iOS SDKs..."
           mkdir -p "$HOME/theos/sdks"
           SDK_URLS=$(gh api repos/theos/sdks/releases --jq '[.[] | select(.assets | length > 0)][0].assets[] | select(.name | test("^iPhoneOS.*\\.sdk\\.tar\\."; "i")) | .browser_download_url')
+          echo "$SDK_URLS"
           test -n "$SDK_URLS"
           for url in $SDK_URLS; do
-            echo "Downloading SDK: $url"
+            echo "Downloading: $url"
             curl -fL "$url" -o /tmp/sdk.tar.xz
             tar -xf /tmp/sdk.tar.xz -C "$HOME/theos/sdks/"
             rm -f /tmp/sdk.tar.xz
           done
 
-          echo "==> Verifying Theos installation..."
+          echo "==> Verifying Theos & SDKs..."
           test -f "$HOME/theos/makefiles/common.mk"
-          ls -la "$HOME/theos/toolchain/linux/iphone/bin"
           ls -d "$HOME/theos/sdks/"*.sdk
 
       - name: Build Rootless Package (iOS 15 - 16.3.1+)
