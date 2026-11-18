@@ -6,20 +6,8 @@
 #import <math.h>
 
 // ============================================================================
-// CircleSwitcher v3.0.0 — Native 3D Card Engine (Zero Overlay / Zero Freeze)
+// CircleSwitcher v3.0.1 — Native 3D Card Engine (Zero Overlay / Zero Freeze)
 // Supports iOS 14.0 - 16.3.1+ (Rootless & Rootful)
-//
-// Key Architectural Upgrades in v3.0.0:
-//   1. Transforms native SBFluidSwitcherItemContainer / SBAppSwitcherPageView
-//      directly -> 100% native 120Hz zoom-in/out, zero black screen, zero Home
-//      Screen swipe lock, zero in-app touch freeze.
-//   2. Hides SBFloatingDockWindow / SBDockView cleanly while Switcher is open
-//      -> removes the bottom horizontal line & dock bar completely.
-//   3. Renders app icon & title on an un-tilted sibling CSNativeCardBadgeView
-//      -> icons & labels stay 100% upright and crisp during 3D card rotation.
-//   4. Full-bleed edge-to-edge vector Liquid Glass bevel (CSNativeGlassBevelView)
-//      matching exact card/orb cornerRadius -> zero black arcs at top/bottom.
-//   5. Single-app Quick Close (✕) closes only the centered card directly above it.
 // ============================================================================
 
 @interface SBAppSwitcherPageView : UIView
@@ -819,7 +807,7 @@ static void CSReloadCallback(CFNotificationCenterRef center,
     }
 }
 
-@end
+%end
 
 // ============================================================================
 // Hook SBFluidSwitcherItemContainer — Direct 3D Card Transform + Upright Badge
@@ -899,7 +887,7 @@ static void CSReloadCallback(CFNotificationCenterRef center,
     CGFloat frontWeight = MAX(0.0, 1.0 - MIN(1.0, absT));
 
     // Track centered container & trigger subtle center haptic
-    if (absT < 0.08 && gCenteredContainer != self) {
+    if (absT < 0.14 && gCenteredContainer != self) {
         gCenteredContainer = self;
         if (kHapticFeedback) {
             if (!kHapticGenerator) {
