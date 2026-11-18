@@ -360,7 +360,6 @@ static UIColor *CSColorFromHueDegrees(CGFloat hueDeg) {
                     @"baseSyncColor": @YES
                 } mutableCopy];
 
-                // Preserve hidden base ring in Orbital Preview (mode 2)
                 if (currentMode != 2) {
                     batch[@"hologramBaseEnabled"] = @(ringGlow);
                 }
