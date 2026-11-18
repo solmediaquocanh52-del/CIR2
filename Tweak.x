@@ -6,15 +6,8 @@
 #import <math.h>
 
 // ============================================================================
-// CircleSwitcher v2.3.0 — 120Hz Anti-Freeze 360° Carousel & Liquid Glass Engine
+// CircleSwitcher v2.3.1 — Max-FPS Anti-Freeze 360° Carousel & Liquid Glass Engine
 // Supports iOS 14.0 - 16.3.1+ (Rootless & Rootful)
-// Fixes in v2.3.0:
-//   - 100% hides native system switcher immediately at transitionDidBegin
-//   - Edge-to-edge vector Liquid Glass bevel on rectangular cards (zero black arcs)
-//   - Single-app kill on (✕) button without dismissing the rest of the switcher
-//   - CATransaction implicit-animation suppression + 120Hz ProMotion CADisplayLink
-//   - Non-overlapping orbital/cylinder spacing + fadeIcons/scaleIcons/rollIcons
-//   - Smooth center-card zoom expansion into native fullscreen app
 // ============================================================================
 
 @interface SBAppSwitcherPageView : UIView
@@ -513,7 +506,7 @@ static void CSReloadCallback(CFNotificationCenterRef center,
 @end
 
 // ============================================================================
-// 120Hz Anti-Freeze 360° Infinite Carousel Stage View
+// Max-FPS Anti-Freeze 360° Infinite Carousel Stage View
 // ============================================================================
 
 @interface CSInfiniteCarouselStageView : UIView <UIGestureRecognizerDelegate>
@@ -696,9 +689,7 @@ static void CSReloadCallback(CFNotificationCenterRef center,
     if (!self.displayLink) {
         self.lastTickTime = CACurrentMediaTime();
         self.displayLink = [CADisplayLink displayLinkWithTarget:self selector:@selector(physicsTick:)];
-        if (@available(iOS 15.0, *)) {
-            self.displayLink.preferredFrameRateRange = CAFrameRateRangeMake(80, 120, 120);
-        }
+        self.displayLink.preferredFramesPerSecond = 120;
         [self.displayLink addToRunLoop:[NSRunLoop mainRunLoop] forMode:NSRunLoopCommonModes];
     }
 }
@@ -824,7 +815,7 @@ static void CSReloadCallback(CFNotificationCenterRef center,
     if (self.isLayingOutCarousel) return;
     self.isLayingOutCarousel = YES;
 
-    // Disable CoreAnimation 0.25s implicit animations so 120Hz physics ticks are silky smooth!
+    // Disable CoreAnimation 0.25s implicit animations so physics ticks are silky smooth!
     [CATransaction begin];
     [CATransaction setDisableActions:YES];
 
@@ -1591,7 +1582,6 @@ static void CSReloadCallback(CFNotificationCenterRef center,
         if (toModeObj && [toModeObj respondsToSelector:@selector(integerValue)]) {
             NSInteger toMode = [toModeObj integerValue];
             if (toMode == 2) {
-                // Immediately hide system switcher as soon as swipe-up begins!
                 gSwitcherActive = YES;
                 dispatch_async(dispatch_get_main_queue(), ^{
                     [self _cs_setSwitcherActive:YES];
@@ -1615,7 +1605,6 @@ static void CSReloadCallback(CFNotificationCenterRef center,
         if (toModeObj && [toModeObj respondsToSelector:@selector(integerValue)]) {
             NSInteger toMode = [toModeObj integerValue];
             if (gIsKillingSingleApp) {
-                // Keep switcher open if user only closed 1 app and other apps remain
                 CSInfiniteCarouselStageView *stage = objc_getAssociatedObject(self, kCSCarouselStageKey);
                 if (stage && stage.items.count > 0) {
                     gSwitcherActive = YES;
@@ -1661,7 +1650,6 @@ static void CSReloadCallback(CFNotificationCenterRef center,
             : [stage reloadAppsFromSwitcher];
 
         if (appCount > 0) {
-            // Hide EVERY native switcher subview so zero system cards/headers ever bleed through!
             for (UIView *sub in self.view.subviews) {
                 if (sub == stage) continue;
                 sub.hidden = YES;
@@ -1759,7 +1747,6 @@ static void CSReloadCallback(CFNotificationCenterRef center,
 - (void)_cs_killAppLayout:(id)appLayout bundleID:(NSString *)bundleID {
     if (!appLayout) return;
     @try {
-        // Use single clean removal path on recentAppLayouts so SpringBoard doesn't force-exit switcher
         for (NSString *clsName in @[@"SBMainSwitcherControllerCoordinator", @"SBMainSwitcherViewController"]) {
             Class cls = NSClassFromString(clsName);
             if (!cls || ![cls respondsToSelector:NSSelectorFromString(@"sharedInstance")]) continue;
@@ -1777,7 +1764,6 @@ static void CSReloadCallback(CFNotificationCenterRef center,
             }
         }
 
-        // Terminate background process cleanly if bundleID is available
         if (bundleID.length > 0) {
             Class fbSystemServiceCls = NSClassFromString(@"FBSSystemService");
             if (fbSystemServiceCls && [fbSystemServiceCls respondsToSelector:NSSelectorFromString(@"sharedService")]) {
