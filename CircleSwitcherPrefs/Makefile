@@ -14,8 +14,8 @@ CircleSwitcherPrefs_FILES = \
 	CSCircleSwitcherLabeledSliderCell.mm
 
 CircleSwitcherPrefs_FRAMEWORKS = UIKit Foundation CoreGraphics QuartzCore
-CircleSwitcherPrefs_PRIVATE_FRAMEWORKS = Preferences
 CircleSwitcherPrefs_CFLAGS = -fobjc-arc -Wno-error
+CircleSwitcherPrefs_LDFLAGS = -Wl,-undefined,dynamic_lookup
 CircleSwitcherPrefs_INSTALL_PATH = /Library/PreferenceBundles
 CircleSwitcherPrefs_RESOURCE_DIRS = Resources
 
