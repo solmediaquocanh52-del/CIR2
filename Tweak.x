@@ -6,14 +6,15 @@
 #import <math.h>
 
 // ============================================================================
-// CircleSwitcher v2.1.0 — True 360° Infinite Carousel Engine & Native Fullscreen Safety
+// CircleSwitcher v2.2.0 — Anti-Freeze 360° Infinite Carousel & Native Fullscreen Engine
 // Supports iOS 14.0 - 16.3.1+ (Rootless & Rootful)
-// Fixes:
-//   1. 100% Native Fullscreen Apps (never clips Facebook/Settings/apps into ovals!)
-//   2. True Infinite 360° Bi-Directional Carousel (Left & Right endless wrap-around)
-//   3. True 1:1 Circular Orbs (zero vertical squashing, zero square glass_rim bleed)
-//   4. Strict Switcher Visibility Guard (zero ambient_backdrop leak on Home Screen)
-//   5. Clean Header Control (zero overlapping native app names / Bubble labels)
+// Critical Stability Fixes (v2.2.0):
+//   - REMOVED drawViewHierarchyInRect: (eliminates GPU/WindowServer deadlock on iOS 16)
+//   - REMOVED viewDidLayoutSubviews mutation & recursive layoutSubviews loops
+//   - NEVER activates mid-swipe (only activates after transitionDidEnd into mode 2)
+//   - Home Bar pass-through in hitTest: (bottom 40pt ALWAYS goes to SpringBoard)
+//   - Safe hardware UIBlurEffect entrance fade (zero private CAFilter lockups)
+//   - 100% Native Fullscreen Apps (never touches SBAppSwitcherPageView in modes 0-3)
 // ============================================================================
 
 @interface SBAppSwitcherPageView : UIView
@@ -35,7 +36,7 @@
 @interface SBFluidSwitcherViewController : UIViewController
 @property (nonatomic, copy) NSArray *appLayouts;
 @property (nonatomic, strong) NSDictionary *visibleItemContainers;
-- (void)_cs_refreshSwitcherUI;
+- (void)_cs_handlePrefsOrStateChanged;
 - (void)_cs_setSwitcherActive:(BOOL)active;
 - (void)_cs_dismissSwitcherToHome;
 - (void)_cs_activateAppLayout:(id)appLayout bundleID:(NSString *)bundleID;
@@ -50,12 +51,7 @@ static NSString * const kCSDomain = @"com.vn.circleswitcher";
 static NSString * const kCSReloadNotification = @"com.vn.circleswitcher/ReloadPrefs";
 
 static BOOL kEnabled = YES;
-// 0: Vòng Trụ Thẻ 3D (Carousel Cards)
-// 1: Icon Tròn Vòng Trụ 3D (Standing Cylindrical Orbs)
-// 2: Khung Tròn & Vành Đai Icon (Orbital Preview & Orbs)
-// 3: Bánh Xe Icon 360° (Radial Ring Wheel)
-// 4..9: Classic Native Modes (Circle Wheel, 3D Cards, Card Deck, CoverFlow, Inverse CoverFlow, 2D Flat)
-static NSInteger kLayoutMode = 0;
+static NSInteger kLayoutMode = 0; // 0: Cylinder Cards, 1: Cylinder Orbs, 2: Orbital Orbs, 3: Radial Ring, 4-9: Classic
 static BOOL kInfiniteScroll = YES;
 static BOOL kCircleMorph = NO;
 static CGFloat kCircleRadius = 34.0;
@@ -87,17 +83,17 @@ static BOOL kScaleIcons = YES;
 static BOOL kRollIcons = NO;
 static BOOL kHapticFeedback = YES;
 
-// Global Switcher Visibility State (Strictly synchronized with SpringBoard LayoutState)
-static BOOL gIsInAppSwitcher = NO;
+// Strictly controlled switcher state
+static BOOL gSwitcherSettledOpen = NO;
+static BOOL gIsUpdatingSwitcherState = NO;
+static __weak SBFluidSwitcherViewController *gPrimarySwitcherVC = nil;
 static __weak UIView *kLastCenteredContainer = nil;
 static UIImpactFeedbackGenerator *kHapticGenerator = nil;
 
-// Associated Object Keys
 static const void *kCSCarouselStageKey = &kCSCarouselStageKey;
-static const void *kCSClassicRimKey    = &kCSClassicRimKey;
 
 // ============================================================================
-// Color & Bundle Asset Helpers (Rootless /var/jb & Rootful)
+// Color & Asset Helpers
 // ============================================================================
 
 static UIColor *CSColorFromHex(NSString *hexStr, CGFloat alpha) {
@@ -156,6 +152,15 @@ static NSBundle *CSPrefsBundle(void) {
 }
 
 static UIImage *CSLoadAsset(NSString *name, BOOL asTemplate) {
+    static NSMutableDictionary<NSString *, UIImage *> *assetCache = nil;
+    static dispatch_once_t onceToken;
+    dispatch_once(&onceToken, ^{
+        assetCache = [NSMutableDictionary dictionary];
+    });
+    NSString *cacheKey = [NSString stringWithFormat:@"%@_%d", name, asTemplate ? 1 : 0];
+    UIImage *cached = assetCache[cacheKey];
+    if (cached) return cached;
+
     NSBundle *b = CSPrefsBundle();
     UIImage *img = b ? [UIImage imageNamed:name inBundle:b compatibleWithTraitCollection:nil] : nil;
     if (!img) {
@@ -175,11 +180,18 @@ static UIImage *CSLoadAsset(NSString *name, BOOL asTemplate) {
     if (img && asTemplate) {
         img = [img imageWithRenderingMode:UIImageRenderingModeAlwaysTemplate];
     }
+    if (img) {
+        assetCache[cacheKey] = img;
+    }
     return img;
 }
 
+static BOOL CSUsesInfiniteCarouselOverlay(void) {
+    return kEnabled && (kLayoutMode == 0 || kLayoutMode == 1 || kLayoutMode == 2 || kLayoutMode == 3);
+}
+
 // ============================================================================
-// SpringBoard App Metadata & Snapshot Extractors (iOS 14 - 16 Safe)
+// Safe App Metadata Helpers (Zero drawViewHierarchyInRect -> Zero Deadlock!)
 // ============================================================================
 
 static NSString *CSBundleIDFromAppLayout(id appLayout) {
@@ -216,14 +228,6 @@ static NSString *CSAppDisplayNameForBundleID(NSString *bundleID) {
                 }
             }
         }
-        Class proxyCls = NSClassFromString(@"LSApplicationProxy");
-        if (proxyCls && [proxyCls respondsToSelector:NSSelectorFromString(@"applicationProxyForIdentifier:")]) {
-            id proxy = ((id (*)(id, SEL, id))objc_msgSend)(proxyCls, NSSelectorFromString(@"applicationProxyForIdentifier:"), bundleID);
-            if (proxy && [proxy respondsToSelector:NSSelectorFromString(@"localizedName")]) {
-                NSString *name = ((id (*)(id, SEL))objc_msgSend)(proxy, NSSelectorFromString(@"localizedName"));
-                if (name.length > 0) return name;
-            }
-        }
     } @catch (NSException *e) {}
     NSArray<NSString *> *parts = [bundleID componentsSeparatedByString:@"."];
     return parts.lastObject.length > 0 ? [parts.lastObject capitalizedString] : bundleID;
@@ -231,69 +235,26 @@ static NSString *CSAppDisplayNameForBundleID(NSString *bundleID) {
 
 static UIImage *CSAppIconForBundleID(NSString *bundleID) {
     if (!bundleID || bundleID.length == 0) return nil;
+    static NSMutableDictionary<NSString *, UIImage *> *iconCache = nil;
+    static dispatch_once_t onceToken;
+    dispatch_once(&onceToken, ^{
+        iconCache = [NSMutableDictionary dictionary];
+    });
+    UIImage *cached = iconCache[bundleID];
+    if (cached) return cached;
+
     @try {
         SEL iconSel = NSSelectorFromString(@"_applicationIconImageForBundleIdentifier:format:scale:");
         if ([UIImage respondsToSelector:iconSel]) {
             CGFloat scale = [UIScreen mainScreen].scale;
             UIImage *img = ((UIImage * (*)(id, SEL, NSString *, int, CGFloat))objc_msgSend)([UIImage class], iconSel, bundleID, 2, scale);
-            if (img) return img;
+            if (img) {
+                iconCache[bundleID] = img;
+                return img;
+            }
         }
     } @catch (NSException *e) {}
     return nil;
-}
-
-static UIImage *CSCaptureSnapshotFromContainer(UIView *container) {
-    if (!container || container.bounds.size.width < 10 || container.bounds.size.height < 10) return nil;
-    UIView *src = container;
-    if ([container respondsToSelector:@selector(pageView)]) {
-        UIView *pv = ((id (*)(id, SEL))objc_msgSend)(container, @selector(pageView));
-        if (pv && pv.bounds.size.width > 10 && pv.bounds.size.height > 10) {
-            src = pv;
-        }
-    }
-    @try {
-        CGSize targetSize = CGSizeMake(src.bounds.size.width * 0.45, src.bounds.size.height * 0.45);
-        UIGraphicsImageRendererFormat *fmt = [UIGraphicsImageRendererFormat defaultFormat];
-        fmt.scale = 1.0;
-        fmt.opaque = YES;
-        UIGraphicsImageRenderer *renderer = [[UIGraphicsImageRenderer alloc] initWithSize:targetSize format:fmt];
-        UIImage *img = [renderer imageWithActions:^(UIGraphicsImageRendererContext *ctx) {
-            [src drawViewHierarchyInRect:CGRectMake(0, 0, targetSize.width, targetSize.height) afterScreenUpdates:NO];
-        }];
-        return img;
-    } @catch (NSException *e) {
-        return nil;
-    }
-}
-
-static BOOL CSIsSpringBoardMainSwitcherVisible(void) {
-    @try {
-        NSArray<NSString *> *clsNames = @[@"SBMainSwitcherControllerCoordinator", @"SBMainSwitcherViewController"];
-        for (NSString *clsName in clsNames) {
-            Class cls = NSClassFromString(clsName);
-            if (!cls) continue;
-            SEL sharedSel = NSSelectorFromString(@"sharedInstance");
-            if (![cls respondsToSelector:sharedSel]) continue;
-            id inst = ((id (*)(id, SEL))objc_msgSend)(cls, sharedSel);
-            if (!inst) continue;
-
-            SEL visSel1 = NSSelectorFromString(@"isMainSwitcherVisible");
-            if ([inst respondsToSelector:visSel1]) {
-                BOOL v = ((BOOL (*)(id, SEL))objc_msgSend)(inst, visSel1);
-                return v;
-            }
-            SEL visSel2 = NSSelectorFromString(@"isAnySwitcherVisible");
-            if ([inst respondsToSelector:visSel2]) {
-                BOOL v = ((BOOL (*)(id, SEL))objc_msgSend)(inst, visSel2);
-                return v;
-            }
-        }
-    } @catch (NSException *e) {}
-    return gIsInAppSwitcher;
-}
-
-static BOOL CSUsesInfiniteCarouselOverlay(void) {
-    return kEnabled && (kLayoutMode == 0 || kLayoutMode == 1 || kLayoutMode == 2 || kLayoutMode == 3);
 }
 
 // ============================================================================
@@ -302,7 +263,6 @@ static BOOL CSUsesInfiniteCarouselOverlay(void) {
 
 static NSDictionary *CSReadPreferencesDictionary(void) {
     NSUserDefaults *defaults = [[NSUserDefaults alloc] initWithSuiteName:kCSDomain];
-    [defaults synchronize];
     NSDictionary *dict = [defaults dictionaryRepresentation];
     if (dict && dict[@"enabled"] != nil) return dict;
 
@@ -360,19 +320,22 @@ static void CSReloadCallback(CFNotificationCenterRef center,
                              CFDictionaryRef userInfo) {
     CSLoadPreferences();
     dispatch_async(dispatch_get_main_queue(), ^{
-        [[NSNotificationCenter defaultCenter] postNotificationName:@"CSInternalPreferencesDidUpdate" object:nil];
+        if (gPrimarySwitcherVC) {
+            [gPrimarySwitcherVC _cs_handlePrefsOrStateChanged];
+        }
     });
 }
 
 // ============================================================================
-// TRUE 360° INFINITE CAROUSEL ITEM VIEW (Zero Squashing, Single Crisp Rim)
+// Frosted Liquid Glass Carousel Item View (Zero Squashing, 60fps Lightweight)
 // ============================================================================
 
 @interface CSInfiniteCarouselItem : UIView
 @property (nonatomic, strong) id appLayout;
 @property (nonatomic, copy) NSString *bundleID;
 @property (nonatomic, copy) NSString *displayName;
-@property (nonatomic, strong) UIImageView *snapshotView;
+@property (nonatomic, strong) UIImageView *ambientIconBG;
+@property (nonatomic, strong) UIVisualEffectView *frostedGlassView;
 @property (nonatomic, strong) UIView *dimOverlay;
 @property (nonatomic, strong) UIImageView *glassRimOverlay;
 @property (nonatomic, strong) UIImageView *iconImageView;
@@ -386,15 +349,25 @@ static void CSReloadCallback(CFNotificationCenterRef center,
 - (instancetype)initWithFrame:(CGRect)frame {
     self = [super initWithFrame:frame];
     if (self) {
-        self.backgroundColor = [UIColor colorWithRed:0.09 green:0.12 blue:0.18 alpha:0.96];
+        self.backgroundColor = [UIColor colorWithRed:0.08 green:0.12 blue:0.19 alpha:0.86];
         self.layer.masksToBounds = YES;
         self.clipsToBounds = YES;
 
-        self.snapshotView = [[UIImageView alloc] initWithFrame:self.bounds];
-        self.snapshotView.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
-        self.snapshotView.contentMode = UIViewContentModeScaleAspectFill;
-        self.snapshotView.clipsToBounds = YES;
-        [self addSubview:self.snapshotView];
+        // Soft tinted icon backdrop inside card/orb (hardware fast, matches approved glass UI)
+        self.ambientIconBG = [[UIImageView alloc] initWithFrame:self.bounds];
+        self.ambientIconBG.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
+        self.ambientIconBG.contentMode = UIViewContentModeScaleAspectFill;
+        self.ambientIconBG.alpha = 0.34;
+        [self addSubview:self.ambientIconBG];
+
+        UIBlurEffectStyle blurStyle = UIBlurEffectStyleDark;
+        if (@available(iOS 13.0, *)) {
+            blurStyle = UIBlurEffectStyleSystemUltraThinMaterialDark;
+        }
+        self.frostedGlassView = [[UIVisualEffectView alloc] initWithEffect:[UIBlurEffect effectWithStyle:blurStyle]];
+        self.frostedGlassView.frame = self.bounds;
+        self.frostedGlassView.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
+        [self addSubview:self.frostedGlassView];
 
         self.dimOverlay = [[UIView alloc] initWithFrame:self.bounds];
         self.dimOverlay.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
@@ -408,13 +381,10 @@ static void CSReloadCallback(CFNotificationCenterRef center,
         self.glassRimOverlay.alpha = 0.0;
         [self addSubview:self.glassRimOverlay];
 
-        self.iconImageView = [[UIImageView alloc] initWithFrame:CGRectMake(0, 0, 62, 62)];
+        self.iconImageView = [[UIImageView alloc] initWithFrame:CGRectMake(0, 0, 66, 66)];
         self.iconImageView.contentMode = UIViewContentModeScaleAspectFill;
-        self.iconImageView.layer.cornerRadius = 15.0;
+        self.iconImageView.layer.cornerRadius = 16.0;
         self.iconImageView.layer.masksToBounds = YES;
-        self.iconImageView.layer.shadowColor = [UIColor blackColor].CGColor;
-        self.iconImageView.layer.shadowOpacity = 0.45;
-        self.iconImageView.layer.shadowRadius = 6.0;
         [self addSubview:self.iconImageView];
 
         self.titleLabel = [[UILabel alloc] initWithFrame:CGRectZero];
@@ -425,8 +395,8 @@ static void CSReloadCallback(CFNotificationCenterRef center,
         self.titleLabel.adjustsFontSizeToFitWidth = YES;
         self.titleLabel.minimumScaleFactor = 0.72;
         self.titleLabel.layer.shadowColor = [UIColor blackColor].CGColor;
-        self.titleLabel.layer.shadowOpacity = 0.85;
-        self.titleLabel.layer.shadowRadius = 3.5;
+        self.titleLabel.layer.shadowOpacity = 0.80;
+        self.titleLabel.layer.shadowRadius = 3.0;
         self.titleLabel.layer.shadowOffset = CGSizeMake(0, 1.5);
         [self addSubview:self.titleLabel];
     }
@@ -436,7 +406,7 @@ static void CSReloadCallback(CFNotificationCenterRef center,
 @end
 
 // ============================================================================
-// TRUE 360° INFINITE CAROUSEL STAGE VIEW (Bi-Directional Infinite Physics!)
+// Anti-Freeze 360° Infinite Carousel Stage View
 // ============================================================================
 
 @interface CSInfiniteCarouselStageView : UIView <UIGestureRecognizerDelegate>
@@ -447,12 +417,12 @@ static void CSReloadCallback(CFNotificationCenterRef center,
 @property (nonatomic, strong) UIImageView *baseOuterHalo;
 @property (nonatomic, strong) UIImageView *baseInnerHalo;
 @property (nonatomic, strong) UIView *carouselContentLayer;
+@property (nonatomic, strong) UIVisualEffectView *entranceBlurVeil;
 @property (nonatomic, strong) UIView *topHeaderPill;
 @property (nonatomic, strong) UIImageView *topHeaderIcon;
 @property (nonatomic, strong) UILabel *topHeaderLabel;
 @property (nonatomic, strong) UIButton *closeButton;
 @property (nonatomic, strong) NSMutableArray<CSInfiniteCarouselItem *> *items;
-@property (nonatomic, strong) NSMutableDictionary<NSString *, UIImage *> *snapshotCache;
 @property (nonatomic, assign) double spinAngle;
 @property (nonatomic, assign) double angularVelocity;
 @property (nonatomic, assign) double snapTargetAngle;
@@ -464,9 +434,11 @@ static void CSReloadCallback(CFNotificationCenterRef center,
 @property (nonatomic, assign) BOOL panLockedVertical;
 @property (nonatomic, assign) BOOL panLockedHorizontal;
 @property (nonatomic, assign) CGFloat verticalDragOffset;
-- (void)reloadAppsFromSwitcher;
+@property (nonatomic, assign) BOOL isLayingOutCarousel;
+@property (nonatomic, assign) CGSize lastLayoutSize;
+- (NSInteger)reloadAppsFromSwitcher;
 - (void)layoutCarousel3D;
-- (void)triggerEntranceMotionBlur;
+- (void)triggerSafeEntranceMotionBlur;
 - (void)stopPhysics;
 @end
 
@@ -479,18 +451,16 @@ static void CSReloadCallback(CFNotificationCenterRef center,
         self.backgroundColor = [UIColor clearColor];
         self.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
         self.items = [NSMutableArray array];
-        self.snapshotCache = [NSMutableDictionary dictionary];
         self.frontItemIndex = 0;
         self.lastHapticIndex = -1;
+        self.lastLayoutSize = CGSizeZero;
 
-        // Subtle dark atmospheric veil (replaces harsh white wash)
         self.darkStageTint = [[UIView alloc] initWithFrame:self.bounds];
         self.darkStageTint.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
         self.darkStageTint.backgroundColor = [UIColor colorWithRed:0.02 green:0.05 blue:0.10 alpha:0.42];
         self.darkStageTint.userInteractionEnabled = NO;
         [self addSubview:self.darkStageTint];
 
-        // Ambient stage radial glow (subtle, never overexposed)
         self.ambientBackdropView = [[UIImageView alloc] initWithFrame:self.bounds];
         self.ambientBackdropView.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
         self.ambientBackdropView.image = CSLoadAsset(@"ambient_backdrop", YES);
@@ -498,7 +468,6 @@ static void CSReloadCallback(CFNotificationCenterRef center,
         self.ambientBackdropView.userInteractionEnabled = NO;
         [self addSubview:self.ambientBackdropView];
 
-        // 3D Hologram Base Platform
         self.hologramBaseView = [[UIView alloc] initWithFrame:CGRectMake(0, 0, 320, 320)];
         self.hologramBaseView.userInteractionEnabled = NO;
         [self addSubview:self.hologramBaseView];
@@ -514,15 +483,22 @@ static void CSReloadCallback(CFNotificationCenterRef center,
         self.baseInnerHalo.image = haloImg;
         [self.hologramBaseView addSubview:self.baseInnerHalo];
 
-        // 3D Carousel Cards/Orbs Container
         self.carouselContentLayer = [[UIView alloc] initWithFrame:self.bounds];
         self.carouselContentLayer.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
         self.carouselContentLayer.backgroundColor = [UIColor clearColor];
         [self addSubview:self.carouselContentLayer];
 
-        // Top Floating App Title Pill (used when titlePosition == 0)
-        self.topHeaderPill = [[UIView alloc] initWithFrame:CGRectMake(0, 0, 180, 42)];
-        self.topHeaderPill.backgroundColor = [UIColor colorWithWhite:0.10 alpha:0.78];
+        // Hardware-safe blur veil for smooth entrance motion blur (never freezes CA!)
+        self.entranceBlurVeil = [[UIVisualEffectView alloc] initWithEffect:[UIBlurEffect effectWithStyle:UIBlurEffectStyleDark]];
+        self.entranceBlurVeil.frame = self.bounds;
+        self.entranceBlurVeil.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
+        self.entranceBlurVeil.userInteractionEnabled = NO;
+        self.entranceBlurVeil.alpha = 0.0;
+        self.entranceBlurVeil.layer.zPosition = 850.0;
+        [self addSubview:self.entranceBlurVeil];
+
+        self.topHeaderPill = [[UIView alloc] initWithFrame:CGRectMake(0, 0, 184, 42)];
+        self.topHeaderPill.backgroundColor = [UIColor colorWithWhite:0.10 alpha:0.80];
         self.topHeaderPill.layer.cornerRadius = 21.0;
         self.topHeaderPill.layer.borderWidth = 1.0;
         self.topHeaderPill.layer.borderColor = [UIColor colorWithWhite:1.0 alpha:0.22].CGColor;
@@ -535,13 +511,12 @@ static void CSReloadCallback(CFNotificationCenterRef center,
         self.topHeaderIcon.layer.masksToBounds = YES;
         [self.topHeaderPill addSubview:self.topHeaderIcon];
 
-        self.topHeaderLabel = [[UILabel alloc] initWithFrame:CGRectMake(42, 6, 128, 30)];
+        self.topHeaderLabel = [[UILabel alloc] initWithFrame:CGRectMake(42, 6, 132, 30)];
         self.topHeaderLabel.font = [UIFont systemFontOfSize:15.0 weight:UIFontWeightBold];
         self.topHeaderLabel.textColor = [UIColor whiteColor];
         self.topHeaderLabel.textAlignment = NSTextAlignmentLeft;
         [self.topHeaderPill addSubview:self.topHeaderLabel];
 
-        // Quick Close (✕) Button
         self.closeButton = [UIButton buttonWithType:UIButtonTypeCustom];
         self.closeButton.frame = CGRectMake(0, 0, 44, 44);
         self.closeButton.backgroundColor = [UIColor colorWithWhite:0.14 alpha:0.84];
@@ -555,7 +530,6 @@ static void CSReloadCallback(CFNotificationCenterRef center,
         [self.closeButton addTarget:self action:@selector(handleCloseFrontApp:) forControlEvents:UIControlEventTouchUpInside];
         [self addSubview:self.closeButton];
 
-        // Gestures: Bi-directional Infinite Spin + Swipe-Up-To-Kill + Tap to Launch / Dismiss
         UIPanGestureRecognizer *pan = [[UIPanGestureRecognizer alloc] initWithTarget:self action:@selector(handlePan:)];
         pan.delegate = self;
         [self addGestureRecognizer:pan];
@@ -569,6 +543,18 @@ static void CSReloadCallback(CFNotificationCenterRef center,
 
 - (void)dealloc {
     [self stopPhysics];
+}
+
+// CRITICAL SAFETY: Always let Home Bar (bottom 44pt) & Status Bar (top 48pt) pass straight through to iOS!
+- (UIView *)hitTest:(CGPoint)point withEvent:(UIEvent *)event {
+    if (self.hidden || self.alpha < 0.05 || !self.userInteractionEnabled) {
+        return nil;
+    }
+    CGFloat h = self.bounds.size.height;
+    if (point.y > (h - 44.0) || point.y < 48.0) {
+        return nil;
+    }
+    return [super hitTest:point withEvent:event];
 }
 
 - (void)stopPhysics {
@@ -591,52 +577,28 @@ static void CSReloadCallback(CFNotificationCenterRef center,
 - (double)slotAngleForCount:(NSInteger)count {
     if (count <= 1) return 2.0 * M_PI;
     if (count <= 7) return (2.0 * M_PI) / (double)count;
-    // Cap visible cylinder density at 8 evenly spaced slots so 15+ open apps never crowd together,
-    // while still wrapping seamlessly 360° infinitely around all N apps!
     return (2.0 * M_PI) / 8.0;
 }
 
-- (void)triggerEntranceMotionBlur {
-    if (!kMotionBlurOn || kMotionBlurIntensity <= 0.1) return;
-    @try {
-        Class filterCls = NSClassFromString(@"CAFilter");
-        SEL filterSel = NSSelectorFromString(@"filterWithType:");
-        if (filterCls && [filterCls respondsToSelector:filterSel]) {
-            id blurFilter = ((id (*)(id, SEL, id))objc_msgSend)(filterCls, filterSel, @"gaussianBlur");
-            if (blurFilter) {
-                [blurFilter setValue:@"csStageBlur" forKey:@"name"];
-                [blurFilter setValue:@(kMotionBlurIntensity) forKey:@"inputRadius"];
-                self.carouselContentLayer.layer.filters = @[blurFilter];
+- (void)triggerSafeEntranceMotionBlur {
+    if (!kMotionBlurOn) return;
 
-                CABasicAnimation *anim = [CABasicAnimation animationWithKeyPath:@"filters.csStageBlur.inputRadius"];
-                anim.fromValue = @(kMotionBlurIntensity);
-                anim.toValue = @(0.0);
-                anim.duration = 0.28;
-                anim.timingFunction = [CAMediaTimingFunction functionWithName:kCAMediaTimingFunctionEaseOut];
-                [self.carouselContentLayer.layer addAnimation:anim forKey:@"csStageBlurFade"];
-
-                dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.28 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
-                    self.carouselContentLayer.layer.filters = nil;
-                });
-            }
-        }
-    } @catch (NSException *e) {}
-
-    // Subtle zoom-in morph settle
-    self.carouselContentLayer.transform = CGAffineTransformMakeScale(1.12, 1.12);
+    self.carouselContentLayer.transform = CGAffineTransformMakeScale(1.14, 1.14);
     self.carouselContentLayer.alpha = 0.0;
+    self.entranceBlurVeil.alpha = MIN(0.75, MAX(0.20, kMotionBlurIntensity / 16.0));
+
     [UIView animateWithDuration:0.26 delay:0 usingSpringWithDamping:0.86 initialSpringVelocity:0.3 options:(UIViewAnimationOptions)UIViewAnimationOptionAllowUserInteraction animations:^{
         self.carouselContentLayer.transform = CGAffineTransformIdentity;
         self.carouselContentLayer.alpha = 1.0;
+        self.entranceBlurVeil.alpha = 0.0;
     } completion:nil];
 }
 
-- (void)reloadAppsFromSwitcher {
+- (NSInteger)reloadAppsFromSwitcher {
     SBFluidSwitcherViewController *vc = self.ownerVC;
-    if (!vc) return;
+    if (!vc) return 0;
 
     NSArray *layouts = nil;
-    NSDictionary *visibleMap = nil;
     @try {
         if ([vc respondsToSelector:@selector(appLayouts)]) {
             layouts = vc.appLayouts;
@@ -649,17 +611,13 @@ static void CSReloadCallback(CFNotificationCenterRef center,
             }
         }
         if (!layouts || layouts.count == 0) {
-            @try { layouts = [vc valueForKey:@"_appLayouts"]; } @catch (NSException *ex) {}
-        }
-        if (!layouts || layouts.count == 0) {
             for (NSString *clsName in @[@"SBMainSwitcherControllerCoordinator", @"SBMainSwitcherViewController"]) {
                 Class cls = NSClassFromString(clsName);
                 if (!cls || ![cls respondsToSelector:NSSelectorFromString(@"sharedInstance")]) continue;
                 id inst = ((id (*)(id, SEL))objc_msgSend)(cls, NSSelectorFromString(@"sharedInstance"));
                 if (!inst) continue;
                 id recent = nil;
-                @try { recent = [inst valueForKey:@"_recentAppLayouts"]; } @catch (NSException *ex) {}
-                if (!recent && [inst respondsToSelector:NSSelectorFromString(@"recentAppLayouts")]) {
+                if ([inst respondsToSelector:NSSelectorFromString(@"recentAppLayouts")]) {
                     recent = ((id (*)(id, SEL))objc_msgSend)(inst, NSSelectorFromString(@"recentAppLayouts"));
                 }
                 if (recent && [recent respondsToSelector:NSSelectorFromString(@"recents")]) {
@@ -668,32 +626,8 @@ static void CSReloadCallback(CFNotificationCenterRef center,
                 }
             }
         }
-        if ([vc respondsToSelector:@selector(visibleItemContainers)]) {
-            visibleMap = vc.visibleItemContainers;
-        }
-        if (!visibleMap) {
-            @try { visibleMap = [vc valueForKey:@"_visibleItemContainers"]; } @catch (NSException *ex) {}
-        }
-        if ((!layouts || layouts.count == 0) && [visibleMap isKindOfClass:[NSDictionary class]]) {
-            layouts = [visibleMap allKeys];
-        }
     } @catch (NSException *e) {}
 
-    // Cache live snapshots from any currently visible native containers
-    if ([visibleMap isKindOfClass:[NSDictionary class]]) {
-        for (id keyLayout in visibleMap) {
-            NSString *bid = CSBundleIDFromAppLayout(keyLayout);
-            UIView *container = visibleMap[keyLayout];
-            if (bid.length > 0 && [container isKindOfClass:[UIView class]]) {
-                UIImage *snap = CSCaptureSnapshotFromContainer(container);
-                if (snap) {
-                    self.snapshotCache[bid] = snap;
-                }
-            }
-        }
-    }
-
-    // Clear previous item views
     for (CSInfiniteCarouselItem *item in self.items) {
         [item.outerHaloView removeFromSuperview];
         [item removeFromSuperview];
@@ -703,14 +637,16 @@ static void CSReloadCallback(CFNotificationCenterRef center,
     if (![layouts isKindOfClass:[NSArray class]] || layouts.count == 0) {
         self.topHeaderPill.hidden = YES;
         self.closeButton.hidden = YES;
-        return;
+        return 0;
     }
 
     UIImage *haloImg = CSLoadAsset(@"orb_halo", YES);
     UIImage *rimImg  = CSLoadAsset(@"glass_rim", NO);
     UIImage *stretchedRim = rimImg ? [rimImg resizableImageWithCapInsets:UIEdgeInsetsMake(rimImg.size.height * 0.45, rimImg.size.width * 0.45, rimImg.size.height * 0.45, rimImg.size.width * 0.45) resizingMode:UIImageResizingModeStretch] : nil;
 
-    for (id layout in layouts) {
+    NSInteger maxApps = MIN((NSInteger)layouts.count, 24);
+    for (NSInteger idx = 0; idx < maxApps; idx++) {
+        id layout = layouts[idx];
         NSString *bid = CSBundleIDFromAppLayout(layout);
         if (!bid || bid.length == 0) continue;
 
@@ -719,14 +655,10 @@ static void CSReloadCallback(CFNotificationCenterRef center,
         item.bundleID = bid;
         item.displayName = CSAppDisplayNameForBundleID(bid);
         item.titleLabel.text = item.displayName;
-        item.iconImageView.image = CSAppIconForBundleID(bid);
 
-        UIImage *snap = self.snapshotCache[bid];
-        if (snap) {
-            item.snapshotView.image = snap;
-        } else {
-            item.snapshotView.image = nil;
-        }
+        UIImage *appIcon = CSAppIconForBundleID(bid);
+        item.iconImageView.image = appIcon;
+        item.ambientIconBG.image = appIcon;
 
         BOOL isCircularMode = (kLayoutMode == 1 || kLayoutMode == 2 || kLayoutMode == 3);
         item.glassRimOverlay.image = isCircularMode ? rimImg : stretchedRim;
@@ -749,26 +681,34 @@ static void CSReloadCallback(CFNotificationCenterRef center,
     self.lastHapticIndex = 0;
 
     [self layoutCarousel3D];
+    return (NSInteger)self.items.count;
 }
 
 - (void)layoutSubviews {
     [super layoutSubviews];
-    [self layoutCarousel3D];
+    if (!CGSizeEqualToSize(self.bounds.size, self.lastLayoutSize) && !self.hidden) {
+        self.lastLayoutSize = self.bounds.size;
+        [self layoutCarousel3D];
+    }
 }
 
 - (void)layoutCarousel3D {
+    if (self.isLayingOutCarousel) return;
+    self.isLayingOutCarousel = YES;
+
     CGFloat w = self.bounds.size.width;
     CGFloat h = self.bounds.size.height;
-    if (w < 10 || h < 10) return;
+    if (w < 10 || h < 10) {
+        self.isLayingOutCarousel = NO;
+        return;
+    }
 
     UIColor *glowCol = CSActiveGlowColor(1.0);
     UIColor *baseCol = CSActiveBaseColor(1.0);
 
-    // Subtle Atmospheric Backdrop
     self.ambientBackdropView.hidden = !kBackdropEnabled;
     self.ambientBackdropView.tintColor = [glowCol colorWithAlphaComponent:0.16 * MAX(0.25, kGlowIntensity)];
 
-    // 3D Hologram Base Ring (Modes 0, 1, 2)
     BOOL showBase = kHologramBaseEnabled && (kLayoutMode == 0 || kLayoutMode == 1 || kLayoutMode == 2);
     self.hologramBaseView.hidden = !showBase;
     if (showBase) {
@@ -795,6 +735,7 @@ static void CSReloadCallback(CFNotificationCenterRef center,
     if (count == 0) {
         self.topHeaderPill.hidden = YES;
         self.closeButton.hidden = YES;
+        self.isLayingOutCarousel = NO;
         return;
     }
 
@@ -807,7 +748,6 @@ static void CSReloadCallback(CFNotificationCenterRef center,
     for (NSInteger i = 0; i < count; i++) {
         CSInfiniteCarouselItem *item = self.items[i];
 
-        // True bi-directional infinite wrap-around modulo totalSpan
         double raw = ((double)i * slotAngle) + self.spinAngle;
         double theta = raw;
         if (kInfiniteScroll && count > 1) {
@@ -815,12 +755,9 @@ static void CSReloadCallback(CFNotificationCenterRef center,
             if (theta < 0.0) theta += totalSpan;
             theta -= totalSpan * 0.5;
         }
-
         item.lastTheta = theta;
 
-        // Hide items currently behind the invisible back half when N > 8
-        BOOL visibleOnRing = (fabs(theta) <= M_PI * 0.96);
-        if (!visibleOnRing) {
+        if (fabs(theta) > M_PI * 0.96) {
             item.hidden = YES;
             item.outerHaloView.hidden = YES;
             continue;
@@ -829,7 +766,7 @@ static void CSReloadCallback(CFNotificationCenterRef center,
 
         double cosT = cos(theta);
         double sinT = sin(theta);
-        double frontWeight = (cosT + 1.0) * 0.5; // 1.0 at dead front, 0.0 at back
+        double frontWeight = (cosT + 1.0) * 0.5;
 
         if (cosT > bestCos) {
             bestCos = cosT;
@@ -841,12 +778,10 @@ static void CSReloadCallback(CFNotificationCenterRef center,
         CGFloat itemH = 344.0 * kCardScale;
 
         if (kLayoutMode == 1) {
-            // Mode 1: Standing 1:1 Circular Orbs on 3D Cylinder (NO vertical squashing!)
             CGFloat sz = 188.0 * kOrbSize;
             itemW = sz;
             itemH = sz;
         } else if (kLayoutMode == 2) {
-            // Mode 2: Center Large Circular Window + Smaller Side Orbs (True 1:1!)
             double focus = MAX(0.0, cosT);
             double focusSmooth = pow(focus, 2.2);
             CGFloat bigOrb = 224.0 * kCardScale;
@@ -855,7 +790,6 @@ static void CSReloadCallback(CFNotificationCenterRef center,
             itemW = sz;
             itemH = sz;
         } else if (kLayoutMode == 3) {
-            // Mode 3: Radial 360° Icon Ring Orbs (True 1:1!)
             CGFloat sz = 118.0 * kOrbSize;
             itemW = sz;
             itemH = sz;
@@ -868,7 +802,6 @@ static void CSReloadCallback(CFNotificationCenterRef center,
         CGFloat depthScale = 1.0;
 
         if (kLayoutMode == 0 || kLayoutMode == 1) {
-            // 3D Hologram Cylinder (Cards OR Standing Circular Orbs)
             CGFloat cylR = (w * 0.42) * kCardSpacing;
             posX = (w * 0.5) + cylR * sinT;
             posY = (h * 0.47) - (1.0 - cosT) * 24.0;
@@ -876,7 +809,6 @@ static void CSReloadCallback(CFNotificationCenterRef center,
             angleY = -theta * 0.78 * kWheelCurvature;
             depthScale = 0.62 + 0.38 * frontWeight;
         } else if (kLayoutMode == 2) {
-            // Orbital Preview & Side Orbs
             CGFloat orbitR = (w * 0.44) * kCardSpacing;
             posX = (w * 0.5) + orbitR * sinT;
             posY = (h * 0.48) + (1.0 - cosT) * 18.0;
@@ -884,7 +816,6 @@ static void CSReloadCallback(CFNotificationCenterRef center,
             angleY = -sinT * 0.52 * kWheelCurvature;
             depthScale = 0.72 + 0.28 * frontWeight;
         } else {
-            // Mode 3: Radial 360° Icon Ring
             CGFloat ringR = MIN(w, h) * 0.34 * kCardSpacing;
             posX = (w * 0.5) + ringR * sinT;
             posY = (h * 0.49) - ringR * cosT * 0.85;
@@ -893,7 +824,6 @@ static void CSReloadCallback(CFNotificationCenterRef center,
             depthScale = 0.76 + 0.24 * frontWeight;
         }
 
-        // Apply vertical drag-up-to-kill offset only on the frontmost card
         CGFloat killYOffset = (i == self.frontItemIndex) ? self.verticalDragOffset : 0.0;
         posY += killYOffset;
 
@@ -907,12 +837,10 @@ static void CSReloadCallback(CFNotificationCenterRef center,
             item.layer.cornerCurve = isCircular ? kCACornerCurveCircular : kCACornerCurveContinuous;
         }
 
-        // Depth sorting & smooth back-side fade
         item.layer.zPosition = cosT * 320.0;
         CGFloat killAlpha = (killYOffset < -10.0) ? MAX(0.15, 1.0 + (killYOffset / 240.0)) : 1.0;
         item.alpha = MAX(0.32, 0.38 + 0.62 * frontWeight) * killAlpha;
 
-        // Single Crisp Neon Rim + Liquid Glass Specular Overlay (Zero Double Border!)
         if (kLiquidGlass && kGlowIntensity > 0.01) {
             item.layer.borderWidth = 2.0;
             item.layer.borderColor = [glowCol colorWithAlphaComponent:MIN(0.95, 0.45 + kGlowIntensity * 0.50)].CGColor;
@@ -922,7 +850,6 @@ static void CSReloadCallback(CFNotificationCenterRef center,
             item.glassRimOverlay.alpha = 0.0;
         }
 
-        // Outer Circular Neon Halo (strictly circular 1:1, never square bleed!)
         if (item.outerHaloView.image && kLiquidGlass && kGlowIntensity > 0.01 && isCircular) {
             item.outerHaloView.hidden = NO;
             CGFloat haloDim = itemW * depthScale * 1.28;
@@ -935,38 +862,33 @@ static void CSReloadCallback(CFNotificationCenterRef center,
             item.outerHaloView.hidden = YES;
         }
 
-        // Inner App Icon & Title Positioning + Auto-Dimming when Centered
         CGFloat iconSide = isCircular ? (itemW * 0.42) : (itemW * 0.36);
         item.iconImageView.bounds = CGRectMake(0, 0, iconSide, iconSide);
         item.iconImageView.layer.cornerRadius = iconSide * 0.23;
 
         if (kTitlePosition == 1) {
-            // Centered App Icon + Title with Card Dimming
-            item.dimOverlay.alpha = (item.snapshotView.image ? kCenterDimAlpha : 0.20);
+            item.dimOverlay.alpha = kCenterDimAlpha;
             item.iconImageView.center = CGPointMake(itemW * 0.5, itemH * 0.44);
             item.titleLabel.bounds = CGRectMake(0, 0, itemW * 0.86, 24.0);
             item.titleLabel.center = CGPointMake(itemW * 0.5, itemH * 0.44 + iconSide * 0.5 + 16.0);
             item.iconImageView.alpha = 1.0;
             item.titleLabel.alpha = 1.0;
         } else if (kTitlePosition == 2) {
-            // Bottom inside card
             item.dimOverlay.alpha = 0.16;
-            item.iconImageView.center = CGPointMake(itemW * 0.5, itemH * 0.70);
+            item.iconImageView.center = CGPointMake(itemW * 0.5, itemH * 0.52);
             item.titleLabel.bounds = CGRectMake(0, 0, itemW * 0.86, 22.0);
-            item.titleLabel.center = CGPointMake(itemW * 0.5, itemH * 0.86);
+            item.titleLabel.center = CGPointMake(itemW * 0.5, itemH * 0.84);
             item.iconImageView.alpha = 1.0;
             item.titleLabel.alpha = 1.0;
         } else if (kTitlePosition == 0) {
-            // Top Floating Pill (card stays bright; side orbs show icon cleanly)
-            item.dimOverlay.alpha = (item.snapshotView.image ? 0.0 : 0.12);
-            item.iconImageView.center = CGPointMake(itemW * 0.5, itemH * 0.50);
-            item.iconImageView.alpha = (item.snapshotView.image && !(kLayoutMode == 2 && frontWeight < 0.65)) ? 0.0 : 1.0;
-            item.titleLabel.alpha = 0.0;
-        } else {
-            // Hidden Title
             item.dimOverlay.alpha = 0.0;
             item.iconImageView.center = CGPointMake(itemW * 0.5, itemH * 0.50);
-            item.iconImageView.alpha = item.snapshotView.image ? 0.0 : 1.0;
+            item.iconImageView.alpha = 1.0;
+            item.titleLabel.alpha = 0.0;
+        } else {
+            item.dimOverlay.alpha = 0.0;
+            item.iconImageView.center = CGPointMake(itemW * 0.5, itemH * 0.50);
+            item.iconImageView.alpha = 1.0;
             item.titleLabel.alpha = 0.0;
         }
 
@@ -982,7 +904,6 @@ static void CSReloadCallback(CFNotificationCenterRef center,
 
     self.frontItemIndex = bestIdx;
 
-    // Haptic tick when a new app rotates into front center
     if (kHapticFeedback && bestIdx != self.lastHapticIndex) {
         self.lastHapticIndex = bestIdx;
         if (!kHapticGenerator) {
@@ -991,7 +912,6 @@ static void CSReloadCallback(CFNotificationCenterRef center,
         [kHapticGenerator impactOccurred];
     }
 
-    // Update Top Floating Pill (only when titlePosition == 0)
     CSInfiniteCarouselItem *frontItem = self.items[bestIdx];
     if (kTitlePosition == 0 && frontItem) {
         self.topHeaderPill.hidden = NO;
@@ -1003,17 +923,14 @@ static void CSReloadCallback(CFNotificationCenterRef center,
         self.topHeaderPill.hidden = YES;
     }
 
-    // Update Quick Close (✕) Button below front item
     self.closeButton.hidden = !kShowCloseButton;
     if (kShowCloseButton) {
         CGFloat closeY = (kLayoutMode == 0) ? (h * 0.72) : (h * 0.71);
         self.closeButton.center = CGPointMake(w * 0.5, closeY);
     }
-}
 
-// ============================================================================
-// Physics Tick: Smooth Infinite Momentum + Elastic Center Snap
-// ============================================================================
+    self.isLayingOutCarousel = NO;
+}
 
 - (void)physicsTick:(CADisplayLink *)link {
     CFTimeInterval now = CACurrentMediaTime();
@@ -1021,7 +938,7 @@ static void CSReloadCallback(CFNotificationCenterRef center,
     self.lastTickTime = now;
 
     NSInteger count = (NSInteger)self.items.count;
-    if (count == 0) {
+    if (count == 0 || self.hidden) {
         [self stopPhysics];
         return;
     }
@@ -1040,21 +957,15 @@ static void CSReloadCallback(CFNotificationCenterRef center,
 
     if (fabs(self.angularVelocity) > 0.04) {
         self.spinAngle += self.angularVelocity * dt;
-        // Smooth exponential deceleration
         self.angularVelocity *= pow(0.06, dt);
         [self layoutCarousel3D];
     } else {
-        // Snap smoothly to nearest app slot
         self.angularVelocity = 0.0;
         double step = [self slotAngleForCount:count];
         self.snapTargetAngle = round(self.spinAngle / step) * step;
         self.isSnapping = YES;
     }
 }
-
-// ============================================================================
-// Gestures: Bi-Directional Infinite Pan, Swipe-Up-To-Kill, Tap Launch/Dismiss
-// ============================================================================
 
 - (void)handlePan:(UIPanGestureRecognizer *)pan {
     CGPoint translation = [pan translationInView:self];
@@ -1106,13 +1017,11 @@ static void CSReloadCallback(CFNotificationCenterRef center,
 - (void)handleTap:(UITapGestureRecognizer *)tap {
     CGPoint pt = [tap locationInView:self];
 
-    // Check close button first
     if (!self.closeButton.hidden && CGRectContainsPoint(CGRectInset(self.closeButton.frame, -10, -10), pt)) {
         [self handleCloseFrontApp:self.closeButton];
         return;
     }
 
-    // Hit-test items from frontmost zPosition backwards
     NSArray<CSInfiniteCarouselItem *> *sorted = [self.items sortedArrayUsingComparator:^NSComparisonResult(CSInfiniteCarouselItem *a, CSInfiniteCarouselItem *b) {
         if (a.layer.zPosition > b.layer.zPosition) return NSOrderedAscending;
         if (a.layer.zPosition < b.layer.zPosition) return NSOrderedDescending;
@@ -1131,14 +1040,12 @@ static void CSReloadCallback(CFNotificationCenterRef center,
     }
 
     if (!hitItem) {
-        // Tapped empty space -> dismiss switcher cleanly to Home Screen
         [self.ownerVC _cs_dismissSwitcherToHome];
         return;
     }
 
     NSInteger idx = [self.items indexOfObject:hitItem];
     if (idx != NSNotFound && fabs(hitItem.lastTheta) > 0.42 && self.items.count > 1) {
-        // Rotate tapped side app smoothly to front center
         [self stopPhysics];
         double step = [self slotAngleForCount:self.items.count];
         double delta = -hitItem.lastTheta;
@@ -1146,7 +1053,6 @@ static void CSReloadCallback(CFNotificationCenterRef center,
         self.isSnapping = YES;
         [self startPhysicsIfNeeded];
     } else {
-        // Launch front app into 100% native fullscreen!
         [self stopPhysics];
         [self.ownerVC _cs_activateAppLayout:hitItem.appLayout bundleID:hitItem.bundleID];
     }
@@ -1176,7 +1082,7 @@ static void CSReloadCallback(CFNotificationCenterRef center,
         [self.items removeObject:target];
         self.verticalDragOffset = 0.0;
         [self.ownerVC _cs_killAppLayout:layoutToKill bundleID:bidToKill];
-        [UIView animateWithDuration:0.26 animations:^{
+        [UIView animateWithDuration:0.24 animations:^{
             [self layoutCarousel3D];
         }];
     }];
@@ -1185,18 +1091,14 @@ static void CSReloadCallback(CFNotificationCenterRef center,
 @end
 
 // ============================================================================
-// Hook SBFluidSwitcherItemContainerHeaderView — Fix Overlapping Native Headers
+// Hook SBFluidSwitcherItemContainerHeaderView
 // ============================================================================
 
 %hook SBFluidSwitcherItemContainerHeaderView
 
 - (void)setAlpha:(CGFloat)alpha {
-    if (kEnabled && gIsInAppSwitcher) {
-        if (CSUsesInfiniteCarouselOverlay()) {
-            %orig(0.0);
-            return;
-        }
-        if (kTitlePosition != 0) {
+    if (kEnabled && gSwitcherSettledOpen) {
+        if (CSUsesInfiniteCarouselOverlay() || kTitlePosition != 0) {
             %orig(0.0);
             return;
         }
@@ -1207,8 +1109,7 @@ static void CSReloadCallback(CFNotificationCenterRef center,
 %end
 
 // ============================================================================
-// Hook SBAppSwitcherPageView — Strict Native Fullscreen Restoration!
-// Fixes Facebook / Settings Rounded Corner Cutout Bug Permanently!
+// Hook SBAppSwitcherPageView — 100% Untouched Fullscreen Apps!
 // ============================================================================
 
 %hook SBAppSwitcherPageView
@@ -1216,13 +1117,14 @@ static void CSReloadCallback(CFNotificationCenterRef center,
 - (void)layoutSubviews {
     %orig;
 
-    // Modes 0..3 use the clean Infinite Carousel Overlay -> NEVER touch native pageView!
-    if (!kEnabled || CSUsesInfiniteCarouselOverlay() || !gIsInAppSwitcher) {
-        self.layer.cornerRadius = 0.0;
-        self.layer.masksToBounds = NO;
-        self.layer.borderWidth = 0.0;
-        self.layer.shadowOpacity = 0.0;
-        self.layer.mask = nil;
+    if (!kEnabled || CSUsesInfiniteCarouselOverlay() || !gSwitcherSettledOpen) {
+        if (self.layer.cornerRadius != 0.0 || self.layer.borderWidth != 0.0) {
+            self.layer.cornerRadius = 0.0;
+            self.layer.masksToBounds = NO;
+            self.layer.borderWidth = 0.0;
+            self.layer.shadowOpacity = 0.0;
+            self.layer.mask = nil;
+        }
         return;
     }
 
@@ -1238,13 +1140,12 @@ static void CSReloadCallback(CFNotificationCenterRef center,
 
     BOOL inSwitcherCard = (parentContainer != nil);
     if (inSwitcherCard && [parentContainer respondsToSelector:@selector(contentPageViewScale)]) {
-        if (parentContainer.contentPageViewScale >= 0.91) {
+        if (parentContainer.contentPageViewScale >= 0.90) {
             inSwitcherCard = NO;
         }
     }
 
     if (!inSwitcherCard) {
-        // 100% Native Fullscreen App: wipe every trace of rounding/border!
         self.layer.cornerRadius = 0.0;
         self.layer.masksToBounds = NO;
         self.layer.borderWidth = 0.0;
@@ -1253,7 +1154,6 @@ static void CSReloadCallback(CFNotificationCenterRef center,
         return;
     }
 
-    // Classic Native Modes (4..9) ONLY while actively in Switcher
     if (kCircleMorph) {
         CGFloat minSide = MIN(self.bounds.size.width, self.bounds.size.height);
         self.layer.cornerRadius = MIN(minSide * 0.5, kCircleRadius);
@@ -1276,18 +1176,20 @@ static void CSReloadCallback(CFNotificationCenterRef center,
 
 - (void)_updateCornerRadius {
     %orig;
-    if (!kEnabled || CSUsesInfiniteCarouselOverlay() || !gIsInAppSwitcher) {
-        self.layer.cornerRadius = 0.0;
-        self.layer.masksToBounds = NO;
-        self.layer.borderWidth = 0.0;
-        self.layer.mask = nil;
+    if (!kEnabled || CSUsesInfiniteCarouselOverlay() || !gSwitcherSettledOpen) {
+        if (self.layer.cornerRadius != 0.0 || self.layer.borderWidth != 0.0) {
+            self.layer.cornerRadius = 0.0;
+            self.layer.masksToBounds = NO;
+            self.layer.borderWidth = 0.0;
+            self.layer.mask = nil;
+        }
     }
 }
 
 %end
 
 // ============================================================================
-// Hook SBFluidSwitcherItemContainer — Clean Classic Modes (4..9) + Fullscreen Reset
+// Hook SBFluidSwitcherItemContainer — Classic Modes (4..9) Only
 // ============================================================================
 
 %hook SBFluidSwitcherItemContainer
@@ -1311,25 +1213,29 @@ static void CSReloadCallback(CFNotificationCenterRef center,
 - (void)_cs_resetToNativeFullscreen {
     UIView *targetView = ([self respondsToSelector:@selector(pageView)] && self.pageView) ? self.pageView : self.subviews.firstObject;
     if (targetView) {
-        targetView.layer.transform = CATransform3DIdentity;
-        targetView.layer.cornerRadius = 0.0;
-        targetView.layer.masksToBounds = NO;
-        targetView.layer.borderWidth = 0.0;
-        targetView.layer.shadowOpacity = 0.0;
-        targetView.layer.mask = nil;
+        if (!CATransform3DIsIdentity(targetView.layer.transform)) {
+            targetView.layer.transform = CATransform3DIdentity;
+        }
+        if (targetView.layer.cornerRadius != 0.0 || targetView.layer.borderWidth != 0.0) {
+            targetView.layer.cornerRadius = 0.0;
+            targetView.layer.masksToBounds = NO;
+            targetView.layer.borderWidth = 0.0;
+            targetView.layer.shadowOpacity = 0.0;
+            targetView.layer.mask = nil;
+        }
     }
-    self.layer.zPosition = 0.0;
-    self.layer.shadowOpacity = 0.0;
+    if (self.layer.zPosition != 0.0) self.layer.zPosition = 0.0;
+    if (self.layer.shadowOpacity != 0.0) self.layer.shadowOpacity = 0.0;
 }
 
 %new
 - (void)_cs_applyClassicTransform {
-    if (!kEnabled || CSUsesInfiniteCarouselOverlay() || !gIsInAppSwitcher) {
+    if (!kEnabled || CSUsesInfiniteCarouselOverlay() || !gSwitcherSettledOpen) {
         [self _cs_resetToNativeFullscreen];
         return;
     }
 
-    if ([self respondsToSelector:@selector(contentPageViewScale)] && self.contentPageViewScale >= 0.91) {
+    if ([self respondsToSelector:@selector(contentPageViewScale)] && self.contentPageViewScale >= 0.90) {
         [self _cs_resetToNativeFullscreen];
         return;
     }
@@ -1367,7 +1273,7 @@ static void CSReloadCallback(CFNotificationCenterRef center,
     CGFloat transZ = 0.0;
 
     switch (kLayoutMode) {
-        case 4: { // Circle Wheel 3D
+        case 4: {
             angleY = -clampedT * (M_PI / 5.2) * kWheelCurvature;
             angleZ = clampedT * (M_PI / 18.0) * kWheelCurvature;
             transY = (absT * absT) * 44.0 * kWheelCurvature;
@@ -1375,20 +1281,20 @@ static void CSReloadCallback(CFNotificationCenterRef center,
             scale  = kCardScale * MAX(0.72, 1.0 - absT * 0.14);
             break;
         }
-        case 5: { // 3D Cards
+        case 5: {
             angleY = -clampedT * (M_PI / 6.5) * kWheelCurvature;
             transZ = -absT * 60.0 * kWheelCurvature;
             scale  = kCardScale * MAX(0.78, 1.0 - absT * 0.09);
             break;
         }
-        case 6: { // Card Deck
+        case 6: {
             angleY = -0.22 * kWheelCurvature;
             transZ = -absT * 110.0 * kWheelCurvature;
             transY = -absT * 14.0;
             scale  = kCardScale * MAX(0.74, 1.0 - absT * 0.11);
             break;
         }
-        case 7: { // CoverFlow
+        case 7: {
             CGFloat sign = (clampedT > 0) ? 1.0 : ((clampedT < 0) ? -1.0 : 0.0);
             CGFloat flowFactor = MIN(1.0, absT * 1.4);
             angleY = -sign * flowFactor * (M_PI / 3.4) * kWheelCurvature;
@@ -1396,7 +1302,7 @@ static void CSReloadCallback(CFNotificationCenterRef center,
             scale  = kCardScale * (1.0 - flowFactor * 0.14);
             break;
         }
-        case 8: { // Inverse CoverFlow
+        case 8: {
             CGFloat sign = (clampedT > 0) ? 1.0 : ((clampedT < 0) ? -1.0 : 0.0);
             CGFloat flowFactor = MIN(1.0, absT * 1.4);
             angleY = sign * flowFactor * (M_PI / 3.4) * kWheelCurvature;
@@ -1405,7 +1311,7 @@ static void CSReloadCallback(CFNotificationCenterRef center,
             break;
         }
         case 9:
-        default: { // 2D Flat
+        default: {
             scale = kCardScale;
             break;
         }
@@ -1434,110 +1340,120 @@ static void CSReloadCallback(CFNotificationCenterRef center,
 %end
 
 // ============================================================================
-// Hook SBFluidSwitcherViewController — Strict Switcher Lifecycle & Overlay Host
+// Hook SBFluidSwitcherViewController — Safe Non-Recursive Lifecycle
 // ============================================================================
 
 %hook SBFluidSwitcherViewController
 
 - (void)viewDidLoad {
     %orig;
-    [[NSNotificationCenter defaultCenter] addObserver:self
-                                             selector:@selector(_cs_refreshSwitcherUI)
-                                                 name:@"CSInternalPreferencesDidUpdate"
-                                               object:nil];
-}
-
-- (void)viewWillDisappear:(BOOL)animated {
-    %orig(animated);
-    [self _cs_setSwitcherActive:NO];
-}
-
-- (void)viewDidDisappear:(BOOL)animated {
-    %orig(animated);
-    [self _cs_setSwitcherActive:NO];
+    CGFloat screenW = [UIScreen mainScreen].bounds.size.width;
+    if (self.view.bounds.size.width >= screenW * 0.85 || !gPrimarySwitcherVC) {
+        gPrimarySwitcherVC = self;
+    }
 }
 
 - (void)layoutStateTransitionCoordinator:(id)coordinator transitionDidBeginWithTransitionContext:(id)context {
     %orig(coordinator, context);
+    if (self != gPrimarySwitcherVC && gPrimarySwitcherVC != nil) return;
+
     @try {
         id toModeObj = [context valueForKeyPath:@"toLayoutState.unlockedEnvironmentMode"];
         if (toModeObj && [toModeObj respondsToSelector:@selector(integerValue)]) {
             NSInteger toMode = [toModeObj integerValue];
-            [self _cs_setSwitcherActive:(toMode == 2)];
+            // Immediately hide overlay as soon as user leaves App Switcher (to Home=1 or App=3)
+            if (toMode != 2) {
+                gSwitcherSettledOpen = NO;
+                dispatch_async(dispatch_get_main_queue(), ^{
+                    [self _cs_setSwitcherActive:NO];
+                });
+            }
         }
     } @catch (NSException *e) {}
 }
 
 - (void)layoutStateTransitionCoordinator:(id)coordinator transitionDidEndWithTransitionContext:(id)context {
     %orig(coordinator, context);
+    if (self != gPrimarySwitcherVC && gPrimarySwitcherVC != nil) return;
+
     @try {
         id toModeObj = [context valueForKeyPath:@"toLayoutState.unlockedEnvironmentMode"];
         if (toModeObj && [toModeObj respondsToSelector:@selector(integerValue)]) {
             NSInteger toMode = [toModeObj integerValue];
-            [self _cs_setSwitcherActive:(toMode == 2)];
+            BOOL open = (toMode == 2);
+            gSwitcherSettledOpen = open;
+            // Activate asynchronously AFTER SpringBoard transition finishes -> ZERO mid-swipe hang!
+            dispatch_async(dispatch_get_main_queue(), ^{
+                [self _cs_setSwitcherActive:open];
+            });
         }
     } @catch (NSException *e) {}
 }
 
-- (void)viewDidLayoutSubviews {
-    %orig;
-    BOOL realVisible = CSIsSpringBoardMainSwitcherVisible();
-    if (realVisible != gIsInAppSwitcher) {
-        [self _cs_setSwitcherActive:realVisible];
-    } else if (gIsInAppSwitcher) {
-        CSInfiniteCarouselStageView *stage = objc_getAssociatedObject(self, kCSCarouselStageKey);
-        if (stage && !stage.hidden) {
-            stage.frame = self.view.bounds;
-            [stage layoutCarousel3D];
-        }
-    }
+%new
+- (void)_cs_handlePrefsOrStateChanged {
+    dispatch_async(dispatch_get_main_queue(), ^{
+        [self _cs_setSwitcherActive:gSwitcherSettledOpen];
+    });
 }
 
 %new
 - (void)_cs_setSwitcherActive:(BOOL)active {
-    BOOL wasActive = gIsInAppSwitcher;
-    gIsInAppSwitcher = active;
+    if (gIsUpdatingSwitcherState) return;
+    gIsUpdatingSwitcherState = YES;
 
     CSInfiniteCarouselStageView *stage = objc_getAssociatedObject(self, kCSCarouselStageKey);
-    if (!stage && active && CSUsesInfiniteCarouselOverlay()) {
-        stage = [[CSInfiniteCarouselStageView alloc] initWithFrame:self.view.bounds owner:self];
-        [self.view addSubview:stage];
-        objc_setAssociatedObject(self, kCSCarouselStageKey, stage, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
-    }
 
     if (active && CSUsesInfiniteCarouselOverlay()) {
-        // Capture fresh live snapshots BEFORE hiding native scrollView
-        stage.frame = self.view.bounds;
-        [self.view bringSubviewToFront:stage];
-        [stage reloadAppsFromSwitcher];
+        if (!stage) {
+            stage = [[CSInfiniteCarouselStageView alloc] initWithFrame:self.view.bounds owner:self];
+            [self.view addSubview:stage];
+            objc_setAssociatedObject(self, kCSCarouselStageKey, stage, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+        }
 
-        // Hide native switcher scrollViews cleanly while our 360° carousel is active
-        for (UIView *sub in self.view.subviews) {
-            if (sub == stage) continue;
-            if ([sub isKindOfClass:[UIScrollView class]] || [NSStringFromClass([sub class]) containsString:@"Switcher"] || [NSStringFromClass([sub class]) containsString:@"Scroll"]) {
-                sub.alpha = 0.0;
-                sub.userInteractionEnabled = NO;
+        stage.frame = self.view.bounds;
+        NSInteger appCount = [stage reloadAppsFromSwitcher];
+
+        if (appCount > 0) {
+            // ONLY hide native switcher views when we actually have apps to display!
+            for (UIView *sub in self.view.subviews) {
+                if (sub == stage) continue;
+                if ([sub isKindOfClass:[UIScrollView class]] || [NSStringFromClass([sub class]) containsString:@"Scroll"]) {
+                    sub.alpha = 0.0;
+                }
+            }
+            if (self.view.subviews.lastObject != stage) {
+                [self.view bringSubviewToFront:stage];
+            }
+            BOOL wasHidden = stage.hidden;
+            stage.hidden = NO;
+            stage.alpha = 1.0;
+            stage.userInteractionEnabled = YES;
+            if (wasHidden) {
+                [stage triggerSafeEntranceMotionBlur];
+            }
+        } else {
+            // Safety fallback: if 0 apps found, keep native switcher 100% visible & interactive!
+            stage.hidden = YES;
+            stage.userInteractionEnabled = NO;
+            for (UIView *sub in self.view.subviews) {
+                if (sub == stage) continue;
+                if ([sub isKindOfClass:[UIScrollView class]] || [NSStringFromClass([sub class]) containsString:@"Scroll"]) {
+                    sub.alpha = 1.0;
+                }
             }
         }
-
-        stage.hidden = (stage.items.count == 0);
-        stage.alpha = 1.0;
-        if (!wasActive && !stage.hidden) {
-            [stage triggerEntranceMotionBlur];
-        }
     } else {
-        // Leaving Switcher (Home Screen or Active App) OR using Classic Modes:
-        // Hide Carousel immediately & restore native scrollViews 100%!
         if (stage) {
             [stage stopPhysics];
             stage.hidden = YES;
             stage.alpha = 0.0;
+            stage.userInteractionEnabled = NO;
         }
         for (UIView *sub in self.view.subviews) {
             if (sub == stage) continue;
-            if ([sub isKindOfClass:[UIScrollView class]] || [NSStringFromClass([sub class]) containsString:@"Switcher"] || [NSStringFromClass([sub class]) containsString:@"Scroll"]) {
+            if ([sub isKindOfClass:[UIScrollView class]] || [NSStringFromClass([sub class]) containsString:@"Scroll"]) {
                 sub.alpha = 1.0;
-                sub.userInteractionEnabled = YES;
             }
             for (UIView *child in sub.subviews) {
                 if ([child isKindOfClass:%c(SBFluidSwitcherItemContainer)]) {
@@ -1550,37 +1466,32 @@ static void CSReloadCallback(CFNotificationCenterRef center,
             }
         }
     }
-}
 
-%new
-- (void)_cs_refreshSwitcherUI {
-    BOOL active = CSIsSpringBoardMainSwitcherVisible();
-    [self _cs_setSwitcherActive:active];
+    gIsUpdatingSwitcherState = NO;
 }
 
 %new
 - (void)_cs_dismissSwitcherToHome {
+    gSwitcherSettledOpen = NO;
     [self _cs_setSwitcherActive:NO];
     @try {
-        NSArray<NSString *> *clsNames = @[@"SBMainSwitcherControllerCoordinator", @"SBMainSwitcherViewController"];
-        for (NSString *clsName in clsNames) {
-            Class cls = NSClassFromString(clsName);
-            if (!cls || ![cls respondsToSelector:NSSelectorFromString(@"sharedInstance")]) continue;
-            id inst = ((id (*)(id, SEL))objc_msgSend)(cls, NSSelectorFromString(@"sharedInstance"));
-            if (!inst) continue;
-
-            SEL toggleSel = NSSelectorFromString(@"toggleMainSwitcherNoninteractivelyWithSource:");
-            if ([inst respondsToSelector:toggleSel]) {
-                ((void (*)(id, SEL, NSInteger))objc_msgSend)(inst, toggleSel, 0);
-                return;
-            }
-        }
         Class sbUI = NSClassFromString(@"SBUIController");
         if (sbUI && [sbUI respondsToSelector:NSSelectorFromString(@"sharedInstance")]) {
             id ui = ((id (*)(id, SEL))objc_msgSend)(sbUI, NSSelectorFromString(@"sharedInstance"));
             SEL homeSel = NSSelectorFromString(@"handleHomeButtonSinglePressUp");
             if (ui && [ui respondsToSelector:homeSel]) {
                 ((void (*)(id, SEL))objc_msgSend)(ui, homeSel);
+                return;
+            }
+        }
+        for (NSString *clsName in @[@"SBMainSwitcherControllerCoordinator", @"SBMainSwitcherViewController"]) {
+            Class cls = NSClassFromString(clsName);
+            if (!cls || ![cls respondsToSelector:NSSelectorFromString(@"sharedInstance")]) continue;
+            id inst = ((id (*)(id, SEL))objc_msgSend)(cls, NSSelectorFromString(@"sharedInstance"));
+            SEL toggleSel = NSSelectorFromString(@"toggleMainSwitcherNoninteractivelyWithSource:");
+            if (inst && [inst respondsToSelector:toggleSel]) {
+                ((void (*)(id, SEL, NSInteger))objc_msgSend)(inst, toggleSel, 0);
+                return;
             }
         }
     } @catch (NSException *e) {}
@@ -1588,29 +1499,26 @@ static void CSReloadCallback(CFNotificationCenterRef center,
 
 %new
 - (void)_cs_activateAppLayout:(id)appLayout bundleID:(NSString *)bundleID {
-    // 1. Restore native SpringBoard views FIRST so fullscreen transition is 100% native!
+    gSwitcherSettledOpen = NO;
     [self _cs_setSwitcherActive:NO];
 
-    // 2. Activate app into 100% native fullscreen
-    @try {
-        if (bundleID.length > 0) {
-            UIApplication *sbApp = [UIApplication sharedApplication];
-            SEL launchSel = NSSelectorFromString(@"launchApplicationWithIdentifier:suspended:");
-            if ([sbApp respondsToSelector:launchSel]) {
-                ((void (*)(id, SEL, id, BOOL))objc_msgSend)(sbApp, launchSel, bundleID, NO);
-                return;
-            }
-        }
-    } @catch (NSException *e) {}
-
-    [self _cs_dismissSwitcherToHome];
+    if (bundleID.length > 0) {
+        dispatch_async(dispatch_get_main_queue(), ^{
+            @try {
+                UIApplication *sbApp = [UIApplication sharedApplication];
+                SEL launchSel = NSSelectorFromString(@"launchApplicationWithIdentifier:suspended:");
+                if ([sbApp respondsToSelector:launchSel]) {
+                    ((void (*)(id, SEL, id, BOOL))objc_msgSend)(sbApp, launchSel, bundleID, NO);
+                }
+            } @catch (NSException *e) {}
+        });
+    }
 }
 
 %new
 - (void)_cs_killAppLayout:(id)appLayout bundleID:(NSString *)bundleID {
     if (!appLayout) return;
     @try {
-        // 1. Try native container kill via delegate
         NSDictionary *vis = [self respondsToSelector:@selector(visibleItemContainers)] ? self.visibleItemContainers : nil;
         UIView *container = [vis isKindOfClass:[NSDictionary class]] ? vis[appLayout] : nil;
         if (container) {
@@ -1620,10 +1528,7 @@ static void CSReloadCallback(CFNotificationCenterRef center,
                 ((void (*)(id, SEL, id, NSInteger))objc_msgSend)(del, killContSel, container, 0);
             }
         }
-
-        // 2. Remove from SBRecentAppLayouts / SBMainSwitcherViewController so it stays closed
-        NSArray<NSString *> *clsNames = @[@"SBMainSwitcherControllerCoordinator", @"SBMainSwitcherViewController"];
-        for (NSString *clsName in clsNames) {
+        for (NSString *clsName in @[@"SBMainSwitcherControllerCoordinator", @"SBMainSwitcherViewController"]) {
             Class cls = NSClassFromString(clsName);
             if (!cls || ![cls respondsToSelector:NSSelectorFromString(@"sharedInstance")]) continue;
             id inst = ((id (*)(id, SEL))objc_msgSend)(cls, NSSelectorFromString(@"sharedInstance"));
@@ -1634,7 +1539,9 @@ static void CSReloadCallback(CFNotificationCenterRef center,
                 ((void (*)(id, SEL, id, NSInteger))objc_msgSend)(inst, delLayoutSel, appLayout, 0);
             }
             id recent = nil;
-            @try { recent = [inst valueForKey:@"_recentAppLayouts"]; } @catch (NSException *ex) {}
+            if ([inst respondsToSelector:NSSelectorFromString(@"recentAppLayouts")]) {
+                recent = ((id (*)(id, SEL))objc_msgSend)(inst, NSSelectorFromString(@"recentAppLayouts"));
+            }
             SEL remSel = NSSelectorFromString(@"remove:");
             if (recent && [recent respondsToSelector:remSel]) {
                 ((void (*)(id, SEL, id))objc_msgSend)(recent, remSel, appLayout);
@@ -1646,35 +1553,8 @@ static void CSReloadCallback(CFNotificationCenterRef center,
 %end
 
 // ============================================================================
-// Also Observe SBMainSwitcherViewController / Coordinator Transitions (iOS 14-16)
+// Coordinator Backup Hooks (iOS 14-16.3.1+ Safe, Async Only)
 // ============================================================================
-
-%hook SBMainSwitcherViewController
-
-- (void)layoutStateTransitionCoordinator:(id)coordinator transitionDidBeginWithTransitionContext:(id)context {
-    %orig(coordinator, context);
-    @try {
-        id toModeObj = [context valueForKeyPath:@"toLayoutState.unlockedEnvironmentMode"];
-        if (toModeObj && [toModeObj respondsToSelector:@selector(integerValue)]) {
-            gIsInAppSwitcher = ([toModeObj integerValue] == 2);
-            [[NSNotificationCenter defaultCenter] postNotificationName:@"CSInternalPreferencesDidUpdate" object:nil];
-        }
-    } @catch (NSException *e) {}
-}
-
-- (void)layoutStateTransitionCoordinator:(id)coordinator transitionDidEndWithTransitionContext:(id)context {
-    %orig(coordinator, context);
-    @try {
-        id toModeObj = [context valueForKeyPath:@"toLayoutState.unlockedEnvironmentMode"];
-        if (toModeObj && [toModeObj respondsToSelector:@selector(integerValue)]) {
-            gIsInAppSwitcher = ([toModeObj integerValue] == 2);
-            [[NSNotificationCenter defaultCenter] postNotificationName:@"CSInternalPreferencesDidUpdate" object:nil];
-        }
-    } @catch (NSException *e) {}
-}
-
-%end
-
 
 %hook SBMainSwitcherControllerCoordinator
 
@@ -1682,9 +1562,9 @@ static void CSReloadCallback(CFNotificationCenterRef center,
     %orig(coordinator, context);
     @try {
         id toModeObj = [context valueForKeyPath:@"toLayoutState.unlockedEnvironmentMode"];
-        if (toModeObj && [toModeObj respondsToSelector:@selector(integerValue)]) {
-            gIsInAppSwitcher = ([toModeObj integerValue] == 2);
-            [[NSNotificationCenter defaultCenter] postNotificationName:@"CSInternalPreferencesDidUpdate" object:nil];
+        if (toModeObj && [toModeObj respondsToSelector:@selector(integerValue)] && [toModeObj integerValue] != 2) {
+            gSwitcherSettledOpen = NO;
+            if (gPrimarySwitcherVC) [gPrimarySwitcherVC _cs_handlePrefsOrStateChanged];
         }
     } @catch (NSException *e) {}
 }
@@ -1694,8 +1574,8 @@ static void CSReloadCallback(CFNotificationCenterRef center,
     @try {
         id toModeObj = [context valueForKeyPath:@"toLayoutState.unlockedEnvironmentMode"];
         if (toModeObj && [toModeObj respondsToSelector:@selector(integerValue)]) {
-            gIsInAppSwitcher = ([toModeObj integerValue] == 2);
-            [[NSNotificationCenter defaultCenter] postNotificationName:@"CSInternalPreferencesDidUpdate" object:nil];
+            gSwitcherSettledOpen = ([toModeObj integerValue] == 2);
+            if (gPrimarySwitcherVC) [gPrimarySwitcherVC _cs_handlePrefsOrStateChanged];
         }
     } @catch (NSException *e) {}
 }
