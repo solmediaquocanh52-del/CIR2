@@ -1,4 +1,4 @@
-name: Build Rootless & Rootful .deb
+name: Build CircleSwitcher 2.0.0 (.deb)
 
 on:
   push:
@@ -10,32 +10,48 @@ on:
 jobs:
   build:
     name: Build Rootless & Rootful .deb
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-latest
 
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
 
       - name: Install Theos, Linux Toolchain & iOS SDKs
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           sudo apt-get update
-          sudo apt-get install -y fakeroot git perl clang lldb lld make curl unzip xz-utils zip libxml2 libxml2-dev libssl-dev zlib1g-dev
-          export THEOS=$HOME/theos
-          echo "THEOS=$THEOS" >> $GITHUB_ENV
-          bash -c "$(curl -fsSL https://raw.githubusercontent.com/theos/theos/master/bin/install-theos)"
-          rm -rf "$THEOS/sdks"
-          git clone --depth=1 https://github.com/theos/sdks.git "$THEOS/sdks"
+          sudo apt-get install -y build-essential fakeroot git perl curl xz-utils unzip rsync
+          export THEOS="$HOME/theos"
+          echo "THEOS=$THEOS" >> "$GITHUB_ENV"
+
+          # Theos installer (toolchain). Its SDK step calls api.github.com and can fail, so retry and tolerate it.
+          for i in 1 2 3; do
+            bash -c "$(curl -fsSL https://raw.githubusercontent.com/theos/theos/master/bin/install-theos)" </dev/null && break || echo "install-theos attempt $i failed"
+            sleep 5
+          done
+
+          # SDKs: fetch straight from github.com (no API, no rate limit) if the installer did not get them
+          if ! ls "$THEOS"/sdks/iPhoneOS*.sdk >/dev/null 2>&1; then
+            rm -rf "$THEOS/sdks" /tmp/theos-sdks
+            for i in 1 2 3; do
+              git clone --depth=1 https://github.com/theos/sdks.git /tmp/theos-sdks && break || sleep 5
+            done
+            mkdir -p "$THEOS/sdks"
+            cp -R /tmp/theos-sdks/*.sdk "$THEOS/sdks/"
+          fi
+
+          ls "$THEOS/sdks"
+          test -d "$THEOS/toolchain/linux/iphone/bin"
 
       - name: Build Rootless Package (iOS 15 - 16.3.1+)
         run: |
-          export THEOS=$HOME/theos
           make clean package FINALPACKAGE=1 THEOS_PACKAGE_SCHEME=rootless
           mkdir -p dist/rootless
           cp packages/*.deb dist/rootless/
 
       - name: Build Rootful Package (iOS 14)
         run: |
-          export THEOS=$HOME/theos
           make clean package FINALPACKAGE=1
           mkdir -p dist/rootful
           cp packages/*.deb dist/rootful/
@@ -43,11 +59,13 @@ jobs:
       - name: Upload Rootless .deb Artifact
         uses: actions/upload-artifact@v4
         with:
-          name: CircleSwitcher-Rootless-deb
+          name: CircleSwitcher-2.0.0-Rootless-deb
           path: dist/rootless/*.deb
+          if-no-files-found: error
 
       - name: Upload Rootful .deb Artifact
         uses: actions/upload-artifact@v4
         with:
-          name: CircleSwitcher-Rootful-deb
+          name: CircleSwitcher-2.0.0-Rootful-deb
           path: dist/rootful/*.deb
+          if-no-files-found: error
