@@ -21,7 +21,7 @@ jobs:
         uses: actions/cache@v4
         with:
           path: ~/theos
-          key: theos-sdks-v4-${{ runner.os }}
+          key: theos-sdks-v5-${{ runner.os }}
 
       - name: Install Theos, Linux Toolchain & iOS SDKs
         if: steps.cache-theos.outputs.cache-hit != 'true'
@@ -31,26 +31,26 @@ jobs:
         run: |
           set -e
           sudo apt-get update -y
-          sudo apt-get install -y fakeroot dpkg perl git curl unzip xz-utils libtinfo5 || sudo apt-get install -y fakeroot dpkg perl git curl unzip xz-utils
+          sudo apt-get install -y fakeroot dpkg perl git curl unzip xz-utils
           rm -rf "$HOME/theos" /tmp/tc /tmp/sdks
 
           echo "==> Cloning Theos..."
           git clone --recursive --depth=1 https://github.com/theos/theos.git "$HOME/theos"
 
-          echo "==> Downloading Linux iOS Toolchain via GitHub CLI..."
+          echo "==> Downloading Linux iOS Toolchain..."
           mkdir -p "$HOME/theos/toolchain" /tmp/tc
-          gh release download --repo theos/toolchain-linux-iphone --pattern "*.tar.*" -D /tmp/tc
+          TC_TAG=$(gh api repos/theos/toolchain-linux-x86_64/releases --jq '.[0].tag_name')
+          gh release download "$TC_TAG" --repo theos/toolchain-linux-x86_64 --pattern "*.tar.xz" -D /tmp/tc || \
+          gh release download "$TC_TAG" --repo theos/toolchain-linux-x86_64 --pattern "*.tar.*" -D /tmp/tc
           for f in /tmp/tc/*.tar.*; do
             tar -xf "$f" -C "$HOME/theos/toolchain/"
           done
-          if [ ! -d "$HOME/theos/toolchain/linux/iphone" ] && [ -d "$HOME/theos/toolchain/bin" ]; then
-            mkdir -p "$HOME/theos/toolchain/linux/iphone"
-            mv "$HOME/theos/toolchain/bin" "$HOME/theos/toolchain/lib" "$HOME/theos/toolchain/include" "$HOME/theos/toolchain/share" "$HOME/theos/toolchain/linux/iphone/" 2>/dev/null || true
-          fi
 
-          echo "==> Downloading Patched iOS SDKs via GitHub CLI..."
+          echo "==> Downloading Patched iOS SDKs..."
           mkdir -p "$HOME/theos/sdks" /tmp/sdks
-          gh release download --repo theos/sdks --pattern "iPhoneOS*.tar.*" -D /tmp/sdks
+          SDK_TAG=$(gh api repos/theos/sdks/releases --jq '.[0].tag_name')
+          gh release download "$SDK_TAG" --repo theos/sdks --pattern "iPhoneOS*.sdk.tar.xz" -D /tmp/sdks || \
+          gh release download "$SDK_TAG" --repo theos/sdks --pattern "iPhoneOS*.tar.*" -D /tmp/sdks
           for f in /tmp/sdks/*.tar.*; do
             tar -xf "$f" -C "$HOME/theos/sdks/"
           done
